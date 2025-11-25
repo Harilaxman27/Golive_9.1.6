@@ -5611,6 +5611,40 @@ Ready to load this media file."""
                         processed_img = camera_processors[input_number].process_frame(original_img)
                         if processed_img:
                             self._set_output_image(processed_img)
+
+            # If dialog requested auto output profile, apply detected resolution/FPS and set dropdown to 'Auto'
+            if settings.get('output_profile_auto'):
+                try:
+                    res = settings.get('resolution') or (1920, 1080)
+                    w, h = int(res[0]), int(res[1])
+                    fps_value = int(settings.get('fps') or 60)
+                    # Ensure output size combo exists
+                    if hasattr(self, 'outputSizeComboBox'):
+                        cb = self.outputSizeComboBox
+                        # Insert or update an 'Auto' item at index 0
+                        auto_payload = { 'label': 'Auto', 'width': w, 'height': h, 'fps': fps_value }
+                        found_auto = False
+                        for i in range(cb.count()):
+                            data = cb.itemData(i)
+                            if isinstance(data, dict) and data.get('label') == 'Auto':
+                                cb.setItemData(i, auto_payload)
+                                cb.setCurrentIndex(i)
+                                found_auto = True
+                                break
+                        if not found_auto:
+                            cb.insertItem(0, 'Auto', auto_payload)
+                            cb.setCurrentIndex(0)
+                        # Reflect FPS in fpsComboBox if present
+                        if hasattr(self, 'fpsComboBox'):
+                            try:
+                                self.fpsComboBox.blockSignals(True)
+                                self.fpsComboBox.setCurrentText(f"{fps_value} FPS")
+                            finally:
+                                self.fpsComboBox.blockSignals(False)
+                        # Apply profile to preview and mirror
+                        self._apply_output_profile(w, h, fps_value, 'Auto')
+                except Exception:
+                    pass
             
             print(f"🎨 Real-time camera settings applied to Input {input_number}")
             

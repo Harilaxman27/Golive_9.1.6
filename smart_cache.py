@@ -255,14 +255,14 @@ class SmartCache:
 
         # Offload disk read
         try:
-            from thread_pool_manager import thread_pool
+            from thread_pool_manager import thread_pool, TaskPriority
             def _read_disk():
                 val = self.l3_cache.get(key)
                 if val is not None:
                     with self._lock:
                         self._promote_to_l1(key, val)
                 return val
-            fut = thread_pool.submit_task(_read_disk, priority=thread_pool_manager.TaskPriority.LOW)  # type: ignore[name-defined]
+            fut = thread_pool.submit_task(_read_disk, priority=TaskPriority.LOW)
         except Exception:
             # Fallback to synchronous read if thread pool not available
             val = self.l3_cache.get(key)

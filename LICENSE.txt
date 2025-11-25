@@ -1,0 +1,22 @@
+GoLive Studio End User License Agreement
+
+Copyright (c) 2024 GoLive Studio Team
+
+TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+1. GRANT OF LICENSE
+   Subject to the terms and conditions of this License, GoLive Studio Team hereby grants you a personal, non-exclusive, non-transferable license to use GoLive Studio.
+
+2. RESTRICTIONS
+   You may not:
+   - Reverse engineer, decompile, or disassemble the software
+   - Remove or alter any copyright notices
+   - Distribute or sell copies of the software
+
+3. DISCLAIMER OF WARRANTY
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+4. LIMITATION OF LIABILITY
+   IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+By installing this software, you agree to these terms and conditions.

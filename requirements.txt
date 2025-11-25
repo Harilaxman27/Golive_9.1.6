@@ -1,0 +1,40 @@
+# Core GUI Framework
+PyQt6>=6.5.0
+PyQt6-Qt6>=6.5.0
+PyQt6-sip>=13.5.0
+
+# Image and Video Processing
+Pillow>=9.5.0
+opencv-python>=4.7.0
+numpy>=1.24.3
+av>=10.0.0
+
+# OpenGL for Hardware Acceleration
+PyOpenGL>=3.1.6
+PyOpenGL-accelerate>=3.1.6
+
+# System and Process Management
+psutil>=5.9.0
+typing-extensions>=4.7.0
+six>=1.16.0
+
+# Build and Packaging
+pyinstaller>=5.13.0
+packaging>=23.1
+requests>=2.31.0
+urllib3>=2.0.3
+
+# macOS Dependencies (auto-installed as needed)
+pyobjc-framework-Cocoa; sys_platform == "darwin"
+pyobjc-framework-AVFoundation; sys_platform == "darwin"
+pyobjc-framework-CoreMedia; sys_platform == "darwin"
+pyobjc-framework-Quartz; sys_platform == "darwin"
+
+# Windows Dependencies (auto-installed as needed)
+pywin32>=305; sys_platform == "win32"
+
+# Additional Dependencies
+python-dateutil>=2.8.2
+certifi>=2023.5.7
+charset-normalizer>=3.1.0
+idna>=3.4
