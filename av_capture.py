@@ -84,7 +84,7 @@ class AVFVideoCapture(QObject):
                 opts['pixel_format'] = self._pix_fmt
 
             # Open AVFoundation device
-            self._container = av.open(url=f"avfoundation:{url}", format='avfoundation', options=opts)
+            self._container = av.open(f"avfoundation:{url}", format='avfoundation', options=opts)
             # Pick first video stream
             self._stream = next((s for s in self._container.streams if s.type == 'video'), None)
             if self._stream is None:
@@ -198,7 +198,7 @@ def probe_device(device: str | int, sample_seconds: float = 1.0,
         if pixel_format:
             opts['pixel_format'] = pixel_format
 
-        container = av.open(url=f"avfoundation:{url}", format='avfoundation', options=opts)
+        container = av.open(f"avfoundation:{url}", format='avfoundation', options=opts)
         stream = next((s for s in container.streams if s.type == 'video'), None)
         if stream is None:
             try:

@@ -5641,6 +5641,12 @@ Ready to load this media file."""
                                 self.fpsComboBox.setCurrentText(f"{fps_value} FPS")
                             finally:
                                 self.fpsComboBox.blockSignals(False)
+                        # Sync global FPS controller as well so frame pacing matches camera
+                        try:
+                            if FPS_CONTROLLER_AVAILABLE:
+                                set_global_fps(int(fps_value))
+                        except Exception:
+                            pass
                         # Apply profile to preview and mirror
                         self._apply_output_profile(w, h, fps_value, 'Auto')
                 except Exception:
