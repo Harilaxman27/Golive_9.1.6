@@ -27,173 +27,162 @@ class InputSettingsDialog(QDialog):
         self.setMinimumSize(650, 550)
         self.input_number = input_number
         
-        # Modern dark theme styling
+        # Premium Dark Theme Styling
         self.setStyleSheet("""
             QDialog {
-                background-color: #1e1e1e;
-                color: #e0e0e0;
+                background-color: #121212;
+                color: #ffffff;
             }
             QGroupBox {
-                border: 2px solid #3a3a3a;
+                border: 1px solid #333333;
                 border-radius: 8px;
                 margin-top: 12px;
-                padding-top: 8px;
-                font-weight: bold;
-                color: #ffffff;
-                background-color: #252525;
+                padding-top: 16px;
+                font-weight: 600;
+                color: #e0e0e0;
+                background-color: #1e1e1e;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
                 left: 12px;
-                padding: 0 8px;
-                color: #4fc3f7;
+                padding: 0 5px;
+                color: #64b5f6;
             }
-            QTabWidget::pane {
-                border: 1px solid #3a3a3a;
+            QComboBox {
+                background-color: #2c2c2c;
+                border: 1px solid #424242;
                 border-radius: 6px;
-                background-color: #252525;
-            }
-            QTabBar::tab {
-                background-color: #2d2d2d;
-                color: #b0b0b0;
-                padding: 10px 20px;
-                margin-right: 2px;
-                border-top-left-radius: 6px;
-                border-top-right-radius: 6px;
-                font-weight: 500;
-            }
-            QTabBar::tab:selected {
-                background-color: #3a7ca5;
+                padding: 8px;
                 color: #ffffff;
-                font-weight: bold;
+                min-height: 20px;
             }
-            QTabBar::tab:hover:!selected {
-                background-color: #3a3a3a;
-                color: #ffffff;
+            QComboBox:hover {
+                border: 1px solid #64b5f6;
             }
-            QComboBox, QSpinBox {
-                background-color: #2d2d2d;
-                border: 1px solid #4a4a4a;
-                border-radius: 5px;
-                padding: 6px;
-                color: #e0e0e0;
-                min-height: 28px;
-            }
-            QComboBox:focus, QSpinBox:focus {
-                border: 2px solid #4fc3f7;
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
             }
             QPushButton {
-                background-color: #3a7ca5;
+                background-color: #1976d2;
                 color: #ffffff;
                 border: none;
                 border-radius: 6px;
-                padding: 8px 16px;
+                padding: 10px 20px;
                 font-weight: 600;
-                min-height: 32px;
+                font-size: 13px;
             }
             QPushButton:hover {
-                background-color: #4a8cb5;
+                background-color: #2196f3;
             }
             QPushButton:pressed {
-                background-color: #2a6c95;
+                background-color: #0d47a1;
             }
-            QCheckBox {
-                color: #e0e0e0;
-                spacing: 8px;
+            QPushButton#refreshBtn {
+                background-color: #424242;
             }
-            QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-                border: 2px solid #4a4a4a;
-                border-radius: 4px;
-                background-color: #2d2d2d;
+            QPushButton#refreshBtn:hover {
+                background-color: #616161;
             }
-            QCheckBox::indicator:checked {
-                background-color: #4fc3f7;
-                border-color: #4fc3f7;
+            QLabel {
+                color: #b0bec5;
+                font-size: 13px;
             }
-            QSlider::groove:horizontal {
-                border: 1px solid #4a4a4a;
-                height: 6px;
-                background-color: #2d2d2d;
-                border-radius: 3px;
-            }
-            QSlider::handle:horizontal {
-                background-color: #4fc3f7;
-                border: 2px solid #3a7ca5;
-                width: 16px;
-                height: 16px;
-                margin: -6px 0;
-                border-radius: 8px;
-            }
-            QSlider::handle:horizontal:hover {
-                background-color: #6dd5ff;
+            QLabel#headerLabel {
+                color: #ffffff;
+                font-size: 14px;
+                font-weight: bold;
             }
         """)
         
         layout = QVBoxLayout(self)
-        layout.setSpacing(10)
-        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(20)
+        layout.setContentsMargins(24, 24, 24, 24)
         
-        # Create tabs
-        tabs = QTabWidget()
+        # Header
+        header_layout = QHBoxLayout()
+        icon_label = QLabel("📹")
+        icon_label.setStyleSheet("font-size: 24px;")
+        header_layout.addWidget(icon_label)
         
-        # ===== DEVICE TAB =====
-        device_tab = QWidget()
-        device_layout = QVBoxLayout(device_tab)
-        device_layout.setSpacing(12)
-        
-        # Camera selection group
-        camera_group = QGroupBox("📷 Camera Selection")
+        title_layout = QVBoxLayout()
+        title_layout.setSpacing(4)
+        title_label = QLabel(f"Input {input_number} Settings")
+        title_label.setObjectName("headerLabel")
+        title_label.setStyleSheet("font-size: 18px; font-weight: bold; color: white;")
+        subtitle_label = QLabel("Configure camera source and resolution")
+        subtitle_label.setStyleSheet("color: #757575; font-size: 12px;")
+        title_layout.addWidget(title_label)
+        title_layout.addWidget(subtitle_label)
+        header_layout.addLayout(title_layout)
+        header_layout.addStretch()
+        layout.addLayout(header_layout)
+
+        # Camera Selection Group
+        camera_group = QGroupBox("Device Configuration")
         camera_layout = QVBoxLayout(camera_group)
-        camera_layout.setSpacing(10)
+        camera_layout.setSpacing(16)
+        camera_layout.setContentsMargins(16, 24, 16, 16)
         
-        # Camera dropdown
-        camera_row = QHBoxLayout()
-        camera_label = QLabel("Camera:")
-        camera_label.setStyleSheet("font-weight: 600; color: #ffffff;")
-        camera_row.addWidget(camera_label)
+        # Camera Dropdown
+        cam_row = QVBoxLayout()
+        cam_row.setSpacing(6)
+        cam_label = QLabel("Camera Source")
+        cam_label.setStyleSheet("color: #e0e0e0; font-weight: 500;")
+        cam_row.addWidget(cam_label)
         
+        cam_input_row = QHBoxLayout()
         self.camera_combo = QComboBox()
         self.camera_combo.currentIndexChanged.connect(self._on_camera_changed)
-        camera_row.addWidget(self.camera_combo, 1)
+        cam_input_row.addWidget(self.camera_combo, 1)
         
-        refresh_btn = QPushButton("🔄 Refresh")
+        refresh_btn = QPushButton("⟳")
+        refresh_btn.setObjectName("refreshBtn")
+        refresh_btn.setFixedSize(36, 36)
+        refresh_btn.setToolTip("Refresh Camera List")
         refresh_btn.clicked.connect(self._populate_cameras)
-        camera_row.addWidget(refresh_btn)
-        camera_layout.addLayout(camera_row)
+        cam_input_row.addWidget(refresh_btn)
+        cam_row.addLayout(cam_input_row)
+        camera_layout.addLayout(cam_row)
         
-        # Resolution preset
-        res_row = QHBoxLayout()
-        res_label = QLabel("Resolution:")
-        res_label.setStyleSheet("font-weight: 600; color: #ffffff;")
-        res_row.addWidget(res_label)
+        # Resolution & FPS Row
+        res_fps_layout = QHBoxLayout()
+        res_fps_layout.setSpacing(16)
         
+        # Resolution
+        res_col = QVBoxLayout()
+        res_col.setSpacing(6)
+        res_label = QLabel("Resolution")
+        res_label.setStyleSheet("color: #e0e0e0; font-weight: 500;")
+        res_col.addWidget(res_label)
         self.resolution_combo = QComboBox()
         for w, h, desc in RESOLUTION_PRESETS:
             self.resolution_combo.addItem(f"{desc} ({w}×{h})", (w, h))
         self.resolution_combo.setCurrentIndex(2)  # Default 1080p
-        res_row.addWidget(self.resolution_combo, 1)
-        camera_layout.addLayout(res_row)
+        res_col.addWidget(self.resolution_combo)
+        res_fps_layout.addLayout(res_col)
         
-        # FPS preset
-        fps_row = QHBoxLayout()
-        fps_label = QLabel("Framerate:")
-        fps_label.setStyleSheet("font-weight: 600; color: #ffffff;")
-        fps_row.addWidget(fps_label)
-        
+        # FPS
+        fps_col = QVBoxLayout()
+        fps_col.setSpacing(6)
+        fps_label = QLabel("Framerate")
+        fps_label.setStyleSheet("color: #e0e0e0; font-weight: 500;")
+        fps_col.addWidget(fps_label)
         self.fps_combo = QComboBox()
         for fps in FPS_PRESETS:
             self.fps_combo.addItem(f"{fps} FPS", fps)
         self.fps_combo.setCurrentIndex(2)  # Default 30 FPS
-        fps_row.addWidget(self.fps_combo, 1)
-        camera_layout.addLayout(fps_row)
+        fps_col.addWidget(self.fps_combo)
+        res_fps_layout.addLayout(fps_col)
         
-        # Auto-detect button
-        auto_btn = QPushButton("🎯 Auto-Detect Best Settings")
+        camera_layout.addLayout(res_fps_layout)
+        
+        # Auto Detect Button
+        auto_btn = QPushButton("✨ Auto-Detect Best Settings")
         auto_btn.setStyleSheet("""
             QPushButton {
                 background-color: #2e7d32;
+                margin-top: 8px;
             }
             QPushButton:hover {
                 background-color: #388e3c;
@@ -202,217 +191,31 @@ class InputSettingsDialog(QDialog):
         auto_btn.clicked.connect(self._auto_detect_settings)
         camera_layout.addWidget(auto_btn)
         
-        device_layout.addWidget(camera_group)
+        layout.addWidget(camera_group)
         
-        # Status info
-        self.status_label = QLabel("ℹ️ Select a camera to configure")
-        self.status_label.setStyleSheet("color: #b0b0b0; font-size: 11px; font-style: italic;")
-        self.status_label.setWordWrap(True)
-        device_layout.addWidget(self.status_label)
+        # Status
+        self.status_label = QLabel("Ready")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_label.setStyleSheet("color: #757575; margin-top: 10px;")
+        layout.addWidget(self.status_label)
         
-        device_layout.addStretch()
-        tabs.addTab(device_tab, "Device")
+        layout.addStretch()
         
-        # ===== PICTURE TAB =====
-        picture_tab = QWidget()
-        picture_layout = QVBoxLayout(picture_tab)
-        picture_layout.setSpacing(12)
-        
-        # Picture adjustments group
-        picture_group = QGroupBox("🎨 Picture Adjustments")
-        picture_group_layout = QVBoxLayout(picture_group)
-        picture_group_layout.setSpacing(10)
-        
-        # Brightness
-        brightness_row = QHBoxLayout()
-        brightness_label = QLabel("Brightness:")
-        brightness_label.setStyleSheet("font-weight: 600; color: #ffffff;")
-        brightness_row.addWidget(brightness_label)
-        
-        self.brightness_slider = QSlider(Qt.Orientation.Horizontal)
-        self.brightness_slider.setRange(-100, 100)
-        self.brightness_slider.setValue(0)
-        self.brightness_slider.valueChanged.connect(lambda v: self.brightness_value.setText(f"{v:+d}"))
-        brightness_row.addWidget(self.brightness_slider, 1)
-        
-        self.brightness_value = QLabel("0")
-        self.brightness_value.setStyleSheet("font-weight: bold; color: #4fc3f7; min-width: 40px;")
-        brightness_row.addWidget(self.brightness_value)
-        picture_group_layout.addLayout(brightness_row)
-        
-        # Contrast
-        contrast_row = QHBoxLayout()
-        contrast_label = QLabel("Contrast:")
-        contrast_label.setStyleSheet("font-weight: 600; color: #ffffff;")
-        contrast_row.addWidget(contrast_label)
-        
-        self.contrast_slider = QSlider(Qt.Orientation.Horizontal)
-        self.contrast_slider.setRange(-100, 100)
-        self.contrast_slider.setValue(0)
-        self.contrast_slider.valueChanged.connect(lambda v: self.contrast_value.setText(f"{v:+d}"))
-        contrast_row.addWidget(self.contrast_slider, 1)
-        
-        self.contrast_value = QLabel("0")
-        self.contrast_value.setStyleSheet("font-weight: bold; color: #4fc3f7; min-width: 40px;")
-        contrast_row.addWidget(self.contrast_value)
-        picture_group_layout.addLayout(contrast_row)
-        
-        # Saturation
-        saturation_row = QHBoxLayout()
-        saturation_label = QLabel("Saturation:")
-        saturation_label.setStyleSheet("font-weight: 600; color: #ffffff;")
-        saturation_row.addWidget(saturation_label)
-        
-        self.saturation_slider = QSlider(Qt.Orientation.Horizontal)
-        self.saturation_slider.setRange(-100, 100)
-        self.saturation_slider.setValue(0)
-        self.saturation_slider.valueChanged.connect(lambda v: self.saturation_value.setText(f"{v:+d}"))
-        saturation_row.addWidget(self.saturation_slider, 1)
-        
-        self.saturation_value = QLabel("0")
-        self.saturation_value.setStyleSheet("font-weight: bold; color: #4fc3f7; min-width: 40px;")
-        saturation_row.addWidget(self.saturation_value)
-        picture_group_layout.addLayout(saturation_row)
-        
-        # Reset button
-        reset_btn = QPushButton("↺ Reset to Defaults")
-        reset_btn.clicked.connect(self._reset_picture_settings)
-        picture_group_layout.addWidget(reset_btn)
-        
-        picture_layout.addWidget(picture_group)
-        picture_layout.addStretch()
-        
-        tabs.addTab(picture_tab, "Picture")
-        
-        # ===== ADVANCED TAB =====
-        advanced_tab = QWidget()
-        advanced_layout = QVBoxLayout(advanced_tab)
-        advanced_layout.setSpacing(12)
-        
-        # Transform group
-        transform_group = QGroupBox("🔄 Transform")
-        transform_layout = QVBoxLayout(transform_group)
-        transform_layout.setSpacing(10)
-        
-        self.flip_h_check = QCheckBox("↔️ Flip Horizontal (Mirror)")
-        self.flip_h_check.setStyleSheet("font-weight: 500;")
-        transform_layout.addWidget(self.flip_h_check)
-        
-        self.flip_v_check = QCheckBox("↕️ Flip Vertical")
-        self.flip_v_check.setStyleSheet("font-weight: 500;")
-        transform_layout.addWidget(self.flip_v_check)
-        
-        # Rotation
-        rotation_row = QHBoxLayout()
-        rotation_label = QLabel("Rotation:")
-        rotation_label.setStyleSheet("font-weight: 600; color: #ffffff;")
-        rotation_row.addWidget(rotation_label)
-        
-        self.rotation_combo = QComboBox()
-        self.rotation_combo.addItems(["0° (None)", "90° (Clockwise)", "180° (Upside Down)", "270° (Counter-Clockwise)"])
-        rotation_row.addWidget(self.rotation_combo, 1)
-        transform_layout.addLayout(rotation_row)
-        
-        advanced_layout.addWidget(transform_group)
-        
-        # Enhancement group
-        enhancement_group = QGroupBox("✨ Enhancement")
-        enhancement_layout = QVBoxLayout(enhancement_group)
-        enhancement_layout.setSpacing(10)
-        
-        self.low_light_check = QCheckBox("🌙 Low-Light Boost")
-        self.low_light_check.setStyleSheet("font-weight: 500;")
-        enhancement_layout.addWidget(self.low_light_check)
-        
-        self.noise_reduction_check = QCheckBox("🔇 Noise Reduction")
-        self.noise_reduction_check.setStyleSheet("font-weight: 500;")
-        enhancement_layout.addWidget(self.noise_reduction_check)
-        
-        self.auto_focus_check = QCheckBox("🎯 Auto Focus")
-        self.auto_focus_check.setChecked(True)
-        self.auto_focus_check.setStyleSheet("font-weight: 500;")
-        enhancement_layout.addWidget(self.auto_focus_check)
-        
-        advanced_layout.addWidget(enhancement_group)
-        advanced_layout.addStretch()
-        
-        tabs.addTab(advanced_tab, "Advanced")
-        
-        # ===== EFFECTS TAB =====
-        effects_tab = QWidget()
-        effects_layout = QVBoxLayout(effects_tab)
-        effects_layout.setSpacing(12)
-        
-        # Chroma key group
-        chroma_group = QGroupBox("🟢 Chroma Key (Green Screen)")
-        chroma_layout = QVBoxLayout(chroma_group)
-        chroma_layout.setSpacing(10)
-        
-        self.chroma_enable_check = QCheckBox("✅ Enable Chroma Key")
-        self.chroma_enable_check.setStyleSheet("font-size: 13px; font-weight: 600; color: #4fc3f7;")
-        self.chroma_enable_check.toggled.connect(self._on_chroma_toggled)
-        chroma_layout.addWidget(self.chroma_enable_check)
-        
-        # Color selection
-        color_row = QHBoxLayout()
-        color_label = QLabel("Key Color:")
-        color_label.setStyleSheet("font-weight: 600; color: #ffffff;")
-        color_row.addWidget(color_label)
-        
-        self.chroma_color_combo = QComboBox()
-        self.chroma_color_combo.addItems(["Green", "Blue", "Custom"])
-        self.chroma_color_combo.setEnabled(False)
-        color_row.addWidget(self.chroma_color_combo, 1)
-        chroma_layout.addLayout(color_row)
-        
-        # Threshold
-        threshold_row = QHBoxLayout()
-        threshold_label = QLabel("Threshold:")
-        threshold_label.setStyleSheet("font-weight: 600; color: #ffffff;")
-        threshold_row.addWidget(threshold_label)
-        
-        self.chroma_threshold_slider = QSlider(Qt.Orientation.Horizontal)
-        self.chroma_threshold_slider.setRange(0, 100)
-        self.chroma_threshold_slider.setValue(30)
-        self.chroma_threshold_slider.setEnabled(False)
-        self.chroma_threshold_slider.valueChanged.connect(lambda v: self.chroma_threshold_value.setText(f"{v}"))
-        threshold_row.addWidget(self.chroma_threshold_slider, 1)
-        
-        self.chroma_threshold_value = QLabel("30")
-        self.chroma_threshold_value.setStyleSheet("font-weight: bold; color: #4fc3f7; min-width: 30px;")
-        threshold_row.addWidget(self.chroma_threshold_value)
-        chroma_layout.addLayout(threshold_row)
-        
-        effects_layout.addWidget(chroma_group)
-        effects_layout.addStretch()
-        
-        tabs.addTab(effects_tab, "Effects")
-        
-        # Add tabs to main layout
-        layout.addWidget(tabs)
-        
-        # Action buttons - Only Close button for dynamic updates
+        # Footer Buttons
         btns = QHBoxLayout()
-        btns.addStretch(1)
+        btns.addStretch()
         
-        close_btn = QPushButton("✅ Close")
-        close_btn.setMinimumHeight(36)
-        close_btn.setStyleSheet("""
-            QPushButton {
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #2e7d32, stop:1 #1b5e20);
-                font-size: 13px;
-                padding: 10px 24px;
-            }
-            QPushButton:hover {
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #388e3c, stop:1 #2e7d32);
-            }
-        """)
+        close_btn = QPushButton("Done")
+        close_btn.setFixedWidth(120)
         close_btn.clicked.connect(self.accept)
-        
         btns.addWidget(close_btn)
+        
         layout.addLayout(btns)
+        
+        # Initialize
+        self._populate_cameras()
+        
+        # NOTE: Picture/Advanced/Effects tabs removed as per user request for "basic functionalities"
         
         # Initialize
         self._populate_cameras()
@@ -531,60 +334,41 @@ class InputSettingsDialog(QDialog):
         except Exception as e:
             print(f"Error auto-detecting: {e}")
     
-    def _reset_picture_settings(self):
-        """Reset all picture adjustments to defaults."""
-        self.brightness_slider.setValue(0)
-        self.contrast_slider.setValue(0)
-        self.saturation_slider.setValue(0)
-    
-    def _on_chroma_toggled(self, checked: bool):
-        """Enable/disable chroma key controls."""
-        self.chroma_color_combo.setEnabled(checked)
-        self.chroma_threshold_slider.setEnabled(checked)
-    
     def get_settings(self) -> dict:
         """Return all camera settings."""
         camera_info = self.camera_combo.currentData()
         resolution = self.resolution_combo.currentData()
         fps = self.fps_combo.currentData()
-        rotation_text = self.rotation_combo.currentText()
-        rotation_map = {"0° (None)": 0, "90° (Clockwise)": 90, "180° (Upside Down)": 180, "270° (Counter-Clockwise)": 270}
         
         return {
             'camera': camera_info,
             'camera_name': self.camera_combo.currentText(),
             'resolution': resolution,
             'fps': fps,
-            'brightness': self.brightness_slider.value(),
-            'contrast': self.contrast_slider.value(),
-            'saturation': self.saturation_slider.value(),
-            'flip_horizontal': self.flip_h_check.isChecked(),
-            'flip_vertical': self.flip_v_check.isChecked(),
-            'rotation': rotation_map.get(rotation_text, 0),
-            'low_light_boost': self.low_light_check.isChecked(),
-            'noise_reduction': self.noise_reduction_check.isChecked(),
-            'auto_focus': self.auto_focus_check.isChecked(),
-            'chroma_key_enabled': self.chroma_enable_check.isChecked(),
-            'chroma_color': self.chroma_color_combo.currentText(),
-            'chroma_threshold': self.chroma_threshold_slider.value(),
+            # Default values for removed settings to maintain compatibility
+            'brightness': 0,
+            'contrast': 0,
+            'saturation': 0,
+            'flip_horizontal': False,
+            'flip_vertical': False,
+            'rotation': 0,
+            'low_light_boost': False,
+            'noise_reduction': False,
+            'auto_focus': True,
+            'chroma_key_enabled': False,
+            'chroma_color': 'Green',
+            'chroma_threshold': 30,
         }
     
     def _connect_real_time_updates(self):
         """Connect all controls to real-time updates."""
-        # Picture adjustments
-        self.brightness_slider.valueChanged.connect(self._on_setting_changed)
-        self.contrast_slider.valueChanged.connect(self._on_setting_changed)
-        self.saturation_slider.valueChanged.connect(self._on_setting_changed)
-        
-        # Transforms
-        self.flip_h_check.toggled.connect(self._on_setting_changed)
-        self.flip_v_check.toggled.connect(self._on_setting_changed)
-        self.rotation_combo.currentTextChanged.connect(self._on_setting_changed)
-        
-        # Chroma key
-        self.chroma_enable_check.toggled.connect(self._on_setting_changed)
-        self.chroma_color_combo.currentTextChanged.connect(self._on_setting_changed)
-        self.chroma_threshold_slider.valueChanged.connect(self._on_setting_changed)
+        # Only connect what exists
+        try:
+            self.camera_combo.currentIndexChanged.connect(self._on_setting_changed)
+            self.resolution_combo.currentIndexChanged.connect(self._on_setting_changed)
+            self.fps_combo.currentIndexChanged.connect(self._on_setting_changed)
+        except Exception:
+            pass
     
     def _on_setting_changed(self):
         """Handle real-time setting changes."""
@@ -594,7 +378,8 @@ class InputSettingsDialog(QDialog):
             
             # Apply to camera processor immediately
             from camera_processor import camera_processors
-            camera_processors[self.input_number].update_settings(settings)
+            if self.input_number in camera_processors:
+                camera_processors[self.input_number].update_settings(settings)
             
             # Emit signal for parent to handle
             self.settingsChanged.emit(settings)
@@ -617,27 +402,21 @@ class InputSettingsDialog(QDialog):
                         self.camera_combo.setCurrentIndex(i)
                         break
             
-            # Picture adjustments
-            self.brightness_slider.setValue(settings.get('brightness', 0))
-            self.contrast_slider.setValue(settings.get('contrast', 0))
-            self.saturation_slider.setValue(settings.get('saturation', 0))
+            # Resolution
+            res = settings.get('resolution')
+            if res:
+                for i in range(self.resolution_combo.count()):
+                    if self.resolution_combo.itemData(i) == res:
+                        self.resolution_combo.setCurrentIndex(i)
+                        break
             
-            # Transforms
-            self.flip_h_check.setChecked(settings.get('flip_horizontal', False))
-            self.flip_v_check.setChecked(settings.get('flip_vertical', False))
-            
-            # Rotation
-            rotation = settings.get('rotation', 0)
-            rotation_map = {0: 0, 90: 1, 180: 2, 270: 3}
-            self.rotation_combo.setCurrentIndex(rotation_map.get(rotation, 0))
-            
-            # Chroma key
-            self.chroma_enable_check.setChecked(settings.get('chroma_key_enabled', False))
-            chroma_color = settings.get('chroma_color', 'Green')
-            color_index = self.chroma_color_combo.findText(chroma_color)
-            if color_index >= 0:
-                self.chroma_color_combo.setCurrentIndex(color_index)
-            self.chroma_threshold_slider.setValue(settings.get('chroma_threshold', 30))
+            # FPS
+            fps = settings.get('fps')
+            if fps:
+                for i in range(self.fps_combo.count()):
+                    if self.fps_combo.itemData(i) == fps:
+                        self.fps_combo.setCurrentIndex(i)
+                        break
             
         except Exception as e:
             print(f"Error loading settings: {e}")
