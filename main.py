@@ -21,7 +21,7 @@ if sys.version_info.major == 3 and sys.version_info.minor == 13:
 from PyQt6.QtWidgets import QApplication, QMainWindow, QFrame, QWidget, QSplitter, QMessageBox
 from PyQt6.QtCore import Qt, QSize, qInstallMessageHandler, QtMsgType, QUrl, QTimer, QObject, QEvent
 from PyQt6.QtGui import QIcon, QPixmap, QImage, QFont
-from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QAudioSource, QAudioSink, QMediaDevices, QVideoSink, QCamera, QMediaCaptureSession
+from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QAudioSource, QAudioSink, QMediaDevices, QVideoSink, QCamera, QMediaCaptureSession, QAudioFormat
 # Defer PyAV import to runtime; some systems may not have FFmpeg headers/libs available.
 _HAS_AVF_PYAV = False
 from PyQt6 import uic
@@ -1382,6 +1382,7 @@ class GoLiveStudio(QMainWindow):
                 frame._video_label = label
 
     # Phase 2: Input audio monitoring helpers
+    # Phase 2: Input audio monitoring helpers
     def _ensure_input_audio(self, input_number):
         """Create QAudioSource and QAudioSink to monitor input audio (PyQt6)."""
         if not hasattr(self, 'input_audio_sources'):
@@ -1393,31 +1394,75 @@ class GoLiveStudio(QMainWindow):
 
         if input_number in self.input_audio_sources:
             return
+        
         # Use default input/output devices for now
         input_dev = QMediaDevices.defaultAudioInput()
         output_dev = QMediaDevices.defaultAudioOutput()
-        source = QAudioSource(input_dev)
-        sink = QAudioSink(output_dev)
-        self.input_audio_sources[input_number] = source
-        self.input_audio_sinks[input_number] = sink
+        
+        if input_dev.isNull() or output_dev.isNull():
+             # print(f"Input audio warning: Default audio devices not found for input {input_number}")
+             return
 
-        # Start monitoring immediately unless muted: shuttle bytes from mic to speaker
-        if not getattr(self, f"input{input_number}_audio_muted", True):
-            out_dev = sink.start()
-            in_dev = source.start()
-            from PyQt6.QtCore import QTimer
-            t = QTimer(self)
-            t.setInterval(10)
-            def pump():
-                try:
-                    data = in_dev.read(4096)
-                    if data:
-                        out_dev.write(data)
-                except Exception:
-                    pass
-            t.timeout.connect(pump)
-            t.start()
-            self.input_audio_timers[input_number] = t
+        # Try to find a common format
+        from PyQt6.QtMultimedia import QAudioFormat
+        
+        # Start with input device's preferred format
+        format = input_dev.preferredFormat()
+        
+        # If invalid, try standard defaults
+        if not format.isValid():
+            format = QAudioFormat()
+            format.setSampleRate(48000)
+            format.setChannelCount(2)
+            format.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+        
+        # Check if output supports it
+        if not output_dev.isFormatSupported(format):
+            # Try output preferred
+            format = output_dev.preferredFormat()
+        
+        # If still issue, try standard
+        if not output_dev.isFormatSupported(format):
+             format = QAudioFormat()
+             format.setSampleRate(48000)
+             format.setChannelCount(2)
+             format.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+
+        try:
+            source = QAudioSource(input_dev, format)
+            sink = QAudioSink(output_dev, format)
+            self.input_audio_sources[input_number] = source
+            self.input_audio_sinks[input_number] = sink
+
+            # Start monitoring immediately unless muted: shuttle bytes from mic to speaker
+            if not getattr(self, f"input{input_number}_audio_muted", True):
+                out_dev = sink.start()
+                in_dev = source.start()
+                
+                # Check for errors
+                # if source.error() != QAudioSource.Error.NoError:
+                #      print(f"Audio Source Error: {source.error()}")
+                # if sink.error() != QAudioSink.Error.NoError:
+                #      print(f"Audio Sink Error: {sink.error()}")
+
+                from PyQt6.QtCore import QTimer
+                t = QTimer(self)
+                t.setInterval(10)
+                def pump():
+                    try:
+                        # Read available bytes
+                        bytes_available = source.bytesAvailable()
+                        if bytes_available > 0:
+                            data = in_dev.read(bytes_available)
+                            if data:
+                                out_dev.write(data)
+                    except Exception:
+                        pass
+                t.timeout.connect(pump)
+                t.start()
+                self.input_audio_timers[input_number] = t
+        except Exception as e:
+            print(f"Error initializing audio for input {input_number}: {e}")
 
     def _stop_input_audio(self, input_number):
         if hasattr(self, 'input_audio_timers') and input_number in self.input_audio_timers:
@@ -3065,32 +3110,10 @@ class GoLiveStudio(QMainWindow):
                             dev = d
                             break
                     # Prefer AVFoundation via PyAV for high-FPS capture when available
-                    prefer_pyav = app_config.get('camera.prefer_pyav', True)
-                    if prefer_pyav:
-                        try:
-                            import av_capture as _avc
-                            if not hasattr(self, 'avf_captures'):
-                                self.avf_captures = {}
-                            # Resolution from detection (optional)
-                            w = h = None
-                            res_str = camera_info.get('resolution', '')
-                            if isinstance(res_str, str) and 'x' in res_str:
-                                try:
-                                    w, h = map(int, res_str.split('x'))
-                                except Exception:
-                                    w = h = None
-                            # FPS request override
-                            req = app_config.get(f'camera.input{input_number}.fps_request', None)
-                            req = int(req) if req is not None and int(req) > 0 else None
-                            avf = _avc.AVFVideoCapture(input_number, target_name, width=w, height=h, fps=req)
-                            avf.frameReady.connect(self._on_avf_frame)
-                            avf.error.connect(lambda msg, idx=input_number: print(f"AVF[{idx}] {msg}"))
-                            if avf.start():
-                                self.avf_captures[input_number] = avf
-                                used_qt_camera = True  # signal-driven
-                                print(f"Started AVFoundation (PyAV) capture for Input-{input_number}: {target_name}")
-                        except Exception as _avfe:
-                            print(f"PyAV AVFoundation capture failed; falling back to Qt: {_avfe}")
+                    # USER REQUEST: Disable PyAV to fix stability issues ("working very worstly")
+                    # PyAV capture block removed for stability.
+                    prefer_pyav = False 
+                    # if prefer_pyav: ... (removed)
                     if not used_qt_camera and dev is not None:
                         if not hasattr(self, 'qt_cameras'):
                             self.qt_cameras = {}
@@ -3337,20 +3360,10 @@ class GoLiveStudio(QMainWindow):
                 self.last_input_image = {}
             if not hasattr(self, 'last_input_pixmap'):
                 self.last_input_pixmap = {}
-            
-            # ✅ APPLY CAMERA PROCESSING (brightness, contrast, chroma key, etc.)
+        
+            # ✅ CAMERA PROCESSING IS NOW DONE ON BACKGROUND THREAD (av_capture.py)
+            # We just use the frame as-is, which is already processed.
             processed_img = qimg
-            try:
-                from camera_processor import camera_processors
-                # Always try to process - the processor will handle if no effects are enabled
-                processed_result = camera_processors[input_number].process_frame(qimg)
-                if processed_result is not None:
-                    processed_img = processed_result
-                    # Only log when effects are actually applied
-                    if camera_processors[input_number].is_enabled():
-                        print(f"✅ Applied camera processing to Input-{input_number}")
-            except Exception as e:
-                print(f"Camera processing error for Input-{input_number}: {e}")
             
             self.last_input_image[input_number] = processed_img.copy()
             pixmap = QPixmap.fromImage(processed_img)
