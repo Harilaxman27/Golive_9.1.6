@@ -21,6 +21,7 @@ import os
 import json
 import math
 import numpy as np
+import time
 
 # Import FPS controller for global timing
 try:
@@ -106,6 +107,11 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
         self._frame_count = 0
         self._memory_cleanup_interval = 100  # Cleanup every 100 frames
         self._offscreen: Optional[QImage] = None
+        # Diagnostics
+        self._diag_frames = 0
+        self._diag_elapsed = QElapsedTimer()
+        self._diag_elapsed.start()
+        self._show_fps_overlay = False  # Set True to draw simple FPS text overlay
         
         # Text overlay properties
         self._text_props: Dict[str, Any] = {
@@ -158,40 +164,14 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
         self.update()
     
     def set_frame(self, frame: Optional[QImage]):
-        """Set the current video frame with FPS controller integration."""
+        """Set the current video frame and update display immediately."""
         self._last_frame = frame
         
-        # CRITICAL FIX: Always update display during transitions to prevent video freezing
-        if self._transition_active:
-            # During transitions, immediately update to show the new frame
-            # Skip FPS controller processing to avoid conversion issues
-            self._update_display()
-            return
-        
-        # Process frame through FPS controller if available (only when not transitioning)
-        if self.fps_controller and frame is not None and not self._transition_active:
-            try:
-                # Convert QImage to numpy array for processing
-                frame_array = self._qimage_to_numpy(frame)
-                if frame_array.size > 0:  # Only process if conversion was successful
-                    timestamped_frame = self.fps_controller.process_input_frame(self.source_id, frame_array)
-                    
-                    if timestamped_frame:
-                        # Frame was accepted by FPS controller, update display
-                        self._update_display()
-                        return
-            except Exception as e:
-                # Silently handle FPS controller errors to avoid spam
-                pass
-        
-        # Fallback: direct update or throttled updates
-        if self._transition_active:
-            # During transitions, update immediately
-            self._update_display()
-        else:
-            # Normal operation: throttle updates to target FPS
-            if not self._update_timer.isActive():
-                self._update_timer.start(self._target_interval_ms)
+        # CRITICAL FIX: Always update display immediately
+        # The previous timer-based throttling and FPS controller logic was causing
+        # the video to get stuck because the timer was being constantly reset
+        # before it could fire. Qt's update() is already coalesced and vsync-aware.
+        self._update_display()
     
     def _qimage_to_numpy(self, qimage: QImage) -> np.ndarray:
         """Convert QImage to numpy array with memory optimization"""
@@ -231,10 +211,12 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
     
     def _update_display(self):
         """Update the display immediately with performance tracking"""
+        import time
         start_time = time.time()
         
         # Increment frame count and perform periodic cleanup
         self._frame_count += 1
+        self._diag_frames += 1
         if self._frame_count % self._memory_cleanup_interval == 0:
             self._cleanup_memory()
         
@@ -244,6 +226,14 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
         if self.performance_optimizer:
             latency_ms = (time.time() - start_time) * 1000
             self.performance_optimizer.record_frame_latency(latency_ms)
+        # Diagnostics: print measured render FPS once per second
+        if self._diag_elapsed.hasExpired(1000):
+            try:
+                print(f"Render FPS: {self._diag_frames}")
+            except Exception:
+                pass
+            self._diag_frames = 0
+            self._diag_elapsed.restart()
     
     def _cleanup_memory(self):
         """Periodic memory cleanup to prevent memory leaks"""
@@ -254,10 +244,9 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
             for key in keys_to_remove:
                 del self._mask_cache[key]
         
-        # Force garbage collection periodically
-        if self._frame_count % (self._memory_cleanup_interval * 5) == 0:
-            import gc
-            gc.collect()
+        # REMOVED: Force garbage collection periodically
+        # gc.collect() causes significant stuttering in real-time video
+        # Python's automatic GC is sufficient for this use case
     
     def _on_performance_update(self, metrics: dict):
         """Handle performance updates from optimizer"""
@@ -385,7 +374,7 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
         
         # CRITICAL FIX: Force immediate repaint during transitions to ensure video continues
         # This ensures the video doesn't freeze during effect transitions
-        self.update()
+        self._update_display()
         
         # Check if transition is complete
         if progress >= 1.0:
@@ -470,7 +459,8 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
     
     def set_target_fps(self, fps: int):
         """Set target rendering FPS to match camera FPS."""
-        self._target_interval_ms = max(5, int(1000 / max(5, min(240, fps))))  # Support up to 240fps
+        self._target_fps = max(5, min(240, int(fps)))
+        self._target_interval_ms = max(5, int(1000 / self._target_fps))  # Support up to 240fps
         print(f"Graphics output FPS updated to {fps}fps (interval: {self._target_interval_ms}ms)")
     
     def paintGL(self):
@@ -517,19 +507,26 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
             
             # Scale to widget size if needed
             if render_size != self.size():
-                display_img = output.scaled(
-                    self.size(),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                )
+                # Use drawImage with rects for hardware-accelerated scaling
+                widget_painter.drawImage(QRectF(self.rect()), output, QRectF(output.rect()))
             else:
-                display_img = output
-            
-            # Draw the final image
-            widget_painter.drawImage(0, 0, display_img)
+                widget_painter.drawImage(0, 0, output)
             
         finally:
             widget_painter.end()
+        # Optional on-screen FPS overlay for quick diagnostics
+        if self._show_fps_overlay:
+            try:
+                overlay_painter = QPainter(self)
+                overlay_painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+                overlay_painter.setPen(QColor(0, 0, 0, 200))
+                overlay_painter.setBrush(QColor(0, 0, 0, 200))
+                overlay_painter.drawRect(6, 6, 90, 28)
+                overlay_painter.setPen(QColor(255, 255, 255, 255))
+                overlay_painter.drawText(12, 26, f"FPS ~ {self._diag_frames}")
+                overlay_painter.end()
+            except Exception:
+                pass
     
     def _get_effective_render_size(self) -> QSize:
         """
@@ -580,18 +577,15 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
         target_w = int(video_rect.width() * self._overscan)
         target_h = int(video_rect.height() * self._overscan)
         
-        # CRITICAL: Use SmoothTransformation for high quality
-        scaled_video = self._last_frame.scaled(
-            QSize(target_w, target_h),
-            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation
-        )
+        # Calculate centered position
+        x = video_rect.x() + (video_rect.width() - target_w) / 2
+        y = video_rect.y() + (video_rect.height() - target_h) / 2
         
-        # Center the scaled video in the target rect
-        x = video_rect.x() + (video_rect.width() - scaled_video.width()) / 2
-        y = video_rect.y() + (video_rect.height() - scaled_video.height()) / 2
+        # OPTIMIZATION: Use drawImage with rects instead of creating scaled image
+        target_rect = QRectF(x, y, target_w, target_h)
+        source_rect = QRectF(self._last_frame.rect())
         
-        painter.drawImage(int(x), int(y), scaled_video)
+        painter.drawImage(target_rect, self._last_frame, source_rect)
         
         # Apply mask if needed
         if self._opening_norm and self._overlay_image:
@@ -716,18 +710,15 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
         target_w = int(video_rect.width() * self._overscan)
         target_h = int(video_rect.height() * self._overscan)
         
-        # CRITICAL: Use SmoothTransformation for high quality
-        scaled_video = self._last_frame.scaled(
-            QSize(target_w, target_h),
-            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation
-        )
+        # Calculate centered position
+        x = video_rect.x() + (video_rect.width() - target_w) / 2
+        y = video_rect.y() + (video_rect.height() - target_h) / 2
         
-        # Center the scaled video in the target rect
-        x = video_rect.x() + (video_rect.width() - scaled_video.width()) / 2
-        y = video_rect.y() + (video_rect.height() - scaled_video.height()) / 2
+        # OPTIMIZATION: Use drawImage with rects instead of creating scaled image
+        target_rect = QRectF(x, y, target_w, target_h)
+        source_rect = QRectF(self._last_frame.rect())
         
-        painter.drawImage(int(x), int(y), scaled_video)
+        painter.drawImage(target_rect, self._last_frame, source_rect)
         
         # Apply mask if opening is specified
         if opening_norm:
