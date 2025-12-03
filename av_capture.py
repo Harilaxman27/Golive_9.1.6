@@ -45,7 +45,13 @@ class AVFVideoCapture(QObject):
         self._thread: Optional[threading.Thread] = None
         self._container = None  # type: ignore[assignment]
         self._stream = None  # type: ignore[assignment]
+        self._stream = None  # type: ignore[assignment]
         self._times: list[float] = []
+        self._processor = None
+
+    def set_processor(self, processor):
+        """Set camera processor for background thread processing."""
+        self._processor = processor
 
     def start(self) -> bool:
         try:
@@ -150,6 +156,22 @@ class AVFVideoCapture(QObject):
                     # Ensure contiguous
                     if not img_bytes.flags['C_CONTIGUOUS']:
                         img_bytes = np.ascontiguousarray(img_bytes)
+                    
+                    # Apply processing if processor is set
+                    if self._processor:
+                        try:
+                            # Reshape to HxWx3 for processing
+                            reshaped = img_bytes.reshape(h, w, 3)
+                            # Process in place or return new array
+                            processed = self._processor.process_numpy(reshaped)
+                            # Update img_bytes if processing returned a new array
+                            if processed is not reshaped:
+                                img_bytes = processed
+                                # Update dimensions if changed (unlikely for color correction but good practice)
+                                h, w = processed.shape[:2]
+                        except Exception as pe:
+                            print(f"AVF background processing error: {pe}")
+
                     # Create QImage (Format_RGB24)
                     qimg = QImage(img_bytes.data, w, h, 3 * w, QImage.Format.Format_RGB888)
                     # Make a deep copy detached from buffer lifetime
