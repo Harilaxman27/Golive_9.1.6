@@ -42,35 +42,35 @@ class StreamingSettingsDialog(QDialog):
         self.setModal(True)
         self.setMinimumSize(600, 560)
         
-        # Modern dark theme styling
+        # Premium Dark Theme Styling
         self.setStyleSheet("""
             QDialog {
-                background-color: #1e1e1e;
-                color: #e0e0e0;
+                background-color: #121212;
+                color: #ffffff;
             }
             QGroupBox {
-                border: 2px solid #3a3a3a;
+                border: 1px solid #333333;
                 border-radius: 8px;
                 margin-top: 12px;
-                padding-top: 8px;
-                font-weight: bold;
-                color: #ffffff;
-                background-color: #252525;
+                padding-top: 16px;
+                font-weight: 600;
+                color: #e0e0e0;
+                background-color: #1e1e1e;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
                 left: 12px;
-                padding: 0 8px;
-                color: #4fc3f7;
+                padding: 0 5px;
+                color: #64b5f6;
             }
             QTabWidget::pane {
-                border: 1px solid #3a3a3a;
+                border: 1px solid #333333;
                 border-radius: 6px;
-                background-color: #252525;
+                background-color: #1e1e1e;
             }
             QTabBar::tab {
-                background-color: #2d2d2d;
-                color: #b0b0b0;
+                background-color: #2c2c2c;
+                color: #b0bec5;
                 padding: 10px 20px;
                 margin-right: 2px;
                 border-top-left-radius: 6px;
@@ -78,42 +78,43 @@ class StreamingSettingsDialog(QDialog):
                 font-weight: 500;
             }
             QTabBar::tab:selected {
-                background-color: #3a7ca5;
+                background-color: #1976d2;
                 color: #ffffff;
                 font-weight: bold;
             }
             QTabBar::tab:hover:!selected {
-                background-color: #3a3a3a;
+                background-color: #424242;
                 color: #ffffff;
             }
             QLineEdit, QSpinBox, QComboBox {
-                background-color: #2d2d2d;
-                border: 1px solid #4a4a4a;
-                border-radius: 5px;
-                padding: 6px;
-                color: #e0e0e0;
-                selection-background-color: #3a7ca5;
+                background-color: #2c2c2c;
+                border: 1px solid #424242;
+                border-radius: 6px;
+                padding: 8px;
+                color: #ffffff;
+                min-height: 20px;
             }
             QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
-                border: 2px solid #4fc3f7;
+                border: 1px solid #64b5f6;
             }
             QPushButton {
-                background-color: #3a7ca5;
+                background-color: #1976d2;
                 color: #ffffff;
                 border: none;
                 border-radius: 6px;
                 padding: 8px 16px;
                 font-weight: 600;
+                font-size: 13px;
             }
             QPushButton:hover {
-                background-color: #4a8cb5;
+                background-color: #2196f3;
             }
             QPushButton:pressed {
-                background-color: #2a6c95;
+                background-color: #0d47a1;
             }
             QPushButton:disabled {
-                background-color: #3a3a3a;
-                color: #707070;
+                background-color: #424242;
+                color: #757575;
             }
             QCheckBox {
                 color: #e0e0e0;
@@ -122,18 +123,17 @@ class StreamingSettingsDialog(QDialog):
             QCheckBox::indicator {
                 width: 18px;
                 height: 18px;
-                border: 2px solid #4a4a4a;
+                border: 2px solid #757575;
                 border-radius: 4px;
-                background-color: #2d2d2d;
+                background-color: #2c2c2c;
             }
             QCheckBox::indicator:checked {
-                background-color: #4fc3f7;
-                border-color: #4fc3f7;
-                image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iMTIiIHZpZXdCb3g9IjAgMCAxMiAxMiIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cGF0aCBkPSJNMTAgMkw0LjUgOC41TDIgNiIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIyIiBmaWxsPSJub25lIi8+PC9zdmc+);
+                background-color: #1976d2;
+                border-color: #1976d2;
             }
             QListWidget {
-                background-color: #2d2d2d;
-                border: 1px solid #4a4a4a;
+                background-color: #2c2c2c;
+                border: 1px solid #424242;
                 border-radius: 6px;
                 color: #e0e0e0;
                 padding: 4px;
@@ -144,46 +144,45 @@ class StreamingSettingsDialog(QDialog):
                 margin: 2px;
             }
             QListWidget::item:selected {
-                background-color: #3a7ca5;
+                background-color: #1976d2;
                 color: #ffffff;
             }
             QListWidget::item:hover {
-                background-color: #3a3a3a;
+                background-color: #424242;
             }
             QTextEdit {
-                background-color: #1a1a1a;
-                border: 1px solid #4a4a4a;
+                background-color: #2c2c2c;
+                border: 1px solid #424242;
                 border-radius: 6px;
-                color: #e0e0e0;
+                color: #ffffff;
                 padding: 8px;
             }
             QSlider::groove:horizontal {
-                border: 1px solid #4a4a4a;
+                border: 1px solid #424242;
                 height: 6px;
-                background-color: #2d2d2d;
+                background-color: #2c2c2c;
                 border-radius: 3px;
             }
             QSlider::handle:horizontal {
-                background-color: #4fc3f7;
-                border: 2px solid #3a7ca5;
+                background-color: #64b5f6;
+                border: 2px solid #1976d2;
                 width: 16px;
                 height: 16px;
                 margin: -6px 0;
                 border-radius: 8px;
             }
             QSlider::handle:horizontal:hover {
-                background-color: #6dd5ff;
+                background-color: #90caf9;
             }
             QProgressBar {
-                border: 1px solid #4a4a4a;
+                border: 1px solid #424242;
                 border-radius: 4px;
-                background-color: #2d2d2d;
+                background-color: #2c2c2c;
                 text-align: center;
                 color: #e0e0e0;
             }
             QProgressBar::chunk {
-                background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #4fc3f7, stop:1 #3a7ca5);
+                background-color: #1976d2;
                 border-radius: 3px;
             }
         """)
