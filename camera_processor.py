@@ -35,6 +35,27 @@ class CameraProcessor:
         self.current_settings = settings
         print(f"✅ Camera processor updated with settings: {settings}")
     
+    def process_numpy(self, arr: np.ndarray) -> np.ndarray:
+        """Process a numpy array (RGB) directly."""
+        if not self.current_settings or not self.is_enabled():
+            return arr
+
+        try:
+            # Apply picture adjustments
+            processed = self._apply_picture_adjustments(arr)
+            
+            # Apply chroma key if enabled
+            if self.current_settings.get('chroma_key_enabled', False):
+                processed = self._apply_chroma_key(processed)
+            
+            # Apply transforms (flip, rotation)
+            processed = self._apply_transforms(processed)
+            
+            return processed
+        except Exception as e:
+            print(f"Numpy processing error: {e}")
+            return arr
+
     def process_frame(self, frame: QImage) -> QImage:
         """Process camera frame with current settings."""
         if frame is None or frame.isNull():
@@ -69,24 +90,19 @@ class CameraProcessor:
                 print(f"Warning: Array size mismatch. Expected {expected_size}, got {arr.size}")
                 return frame  # Return original if size doesn't match
             
-            arr = arr.reshape(height, width, 3)
+            # Reshape and copy to avoid modifying original QImage buffer if needed
+            # (though we are creating a new QImage at the end)
+            arr_reshaped = arr.reshape(height, width, 3).copy()
             
-            # Apply picture adjustments
-            processed = self._apply_picture_adjustments(arr.copy())
-            
-            # Apply chroma key if enabled
-            if self.current_settings.get('chroma_key_enabled', False):
-                processed = self._apply_chroma_key(processed)
-            
-            # Apply transforms (flip, rotation)
-            processed = self._apply_transforms(processed)
+            # Use the new process_numpy method
+            processed = self.process_numpy(arr_reshaped)
             
             # Convert back to QImage
             h, w, ch = processed.shape
             bytes_per_line = ch * w
             result_image = QImage(processed.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
             
-            return result_image
+            return result_image.copy() # Return a copy to ensure data ownership
             
         except Exception as e:
             print(f"Camera processing error: {e}")
@@ -99,6 +115,34 @@ class CameraProcessor:
         contrast = self.current_settings.get('contrast', 0)
         saturation = self.current_settings.get('saturation', 0)
         
+        # Optimization: Use OpenCV if available for much faster processing
+        if CV2_AVAILABLE:
+            # Brightness and Contrast using convertScaleAbs
+            # alpha = contrast (1.0 + c/100), beta = brightness (b * 2.55 for approximate range)
+            if brightness != 0 or contrast != 0:
+                alpha = 1.0 + (contrast / 100.0)
+                beta = brightness * 1.275 # Map -100..100 to -127.5..127.5 roughly
+                frame = cv2.convertScaleAbs(frame, alpha=alpha, beta=beta)
+            
+            # Saturation
+            if saturation != 0:
+                # Convert to HSV
+                hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
+                h, s, v = cv2.split(hsv)
+                
+                # Apply saturation (add to S channel)
+                # Saturation is 0-255. Map -100..100 to multiplier or addition
+                # Using multiplier: 0..2.0
+                sat_mult = 1.0 + (saturation / 100.0)
+                s = cv2.multiply(s, sat_mult) # Saturated math
+                
+                # Merge back
+                hsv = cv2.merge([h, s, v])
+                frame = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+            
+            return frame
+
+        # Fallback to pure Numpy (slower)
         # Convert to float for processing
         frame = frame.astype(np.float32)
         
