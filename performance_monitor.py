@@ -101,7 +101,7 @@ class PerformanceMonitor(QObject):
             # Collect metrics
             metrics = PerformanceMetrics(
                 timestamp=time.time(),
-                cpu_percent=process.cpu_percent(interval=0.1),
+                cpu_percent=process.cpu_percent(interval=None),
                 memory_mb=process.memory_info().rss / (1024 * 1024),
                 memory_percent=process.memory_percent(),
                 fps_actual=self._get_current_fps(),
