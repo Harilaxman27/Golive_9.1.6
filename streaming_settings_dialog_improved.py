@@ -3,10 +3,10 @@ from typing import Dict, Optional
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QComboBox, QLineEdit,
     QSpinBox, QCheckBox, QPushButton, QTextEdit, QMessageBox, QGroupBox, QFrame, QFileDialog,
-    QSizePolicy, QSpacerItem, QListWidget, QListWidgetItem, QTabWidget, QWidget, QSlider, QProgressBar
+    QSizePolicy, QSpacerItem, QListWidget, QListWidgetItem, QTabWidget, QWidget, QSlider, QProgressBar, QScrollArea
 )
 from PyQt6.QtGui import QGuiApplication, QFont, QDragEnterEvent, QDropEvent, QColor, QPalette
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QProcess
 from PyQt6.QtWidgets import QLayout
 from PyQt6.QtMultimedia import QMediaDevices
 
@@ -35,17 +35,19 @@ RESOLUTIONS = [
 FRAMERATES = [15, 25, 30, 50, 60]
 PRESETS = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"]
 
-class StreamingSettingsDialog(QDialog):
+class StreamingSettingsPanel(QWidget):
     def __init__(self, parent, stream_id: int, app_config):
-        super().__init__(parent)
-        self.setWindowTitle(f"🎬 Stream {stream_id} Settings")
-        self.setModal(True)
-        self.setMinimumSize(600, 560)
+        super().__init__() # We don't verify parent here to allow flexible embedding
+        
+        # Explicitly store the logic controller (Main Window) separate from UI parent
+        self._parent = parent 
+        self._stream_id = stream_id
+        self._config = app_config
         
         # Premium Dark Theme Styling
         self.setStyleSheet("""
-            QDialog {
-                background-color: #121212;
+            QWidget {
+                background-color: transparent;
                 color: #ffffff;
             }
             QGroupBox {
@@ -68,6 +70,7 @@ class StreamingSettingsDialog(QDialog):
                 border-radius: 6px;
                 background-color: #1e1e1e;
             }
+            QTabBar{ background-color: transparent; }
             QTabBar::tab {
                 background-color: #2c2c2c;
                 color: #b0bec5;
@@ -186,9 +189,6 @@ class StreamingSettingsDialog(QDialog):
                 border-radius: 3px;
             }
         """)
-        self._parent = parent
-        self._stream_id = stream_id
-        self._config = app_config
 
         # Create main layout
         layout = QVBoxLayout(self)
@@ -197,27 +197,29 @@ class StreamingSettingsDialog(QDialog):
             layout.setContentsMargins(12, 12, 12, 12)
         except Exception:
             pass
+
         try:
             layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         except Exception:
             pass
 
-        # Platform & Connection Group
-        conn_group = QGroupBox("Platform & Connection")
-        conn_layout = QGridLayout(conn_group)
-        self.conn_group = conn_group
-        self.conn_layout = conn_layout
+        # Platform & Connection Page
+        self.conn_page = QWidget()
+        self.conn_layout = QGridLayout(self.conn_page)
+        self.conn_layout.setContentsMargins(12, 12, 12, 12)
+        self.conn_layout.setSpacing(12)
         
         self.platform = QComboBox()
         self.platform.addItems(PLATFORMS.keys())
-        self.platform.setMinimumHeight(28)
+        self.platform.setMinimumHeight(32)
+        
         
         self.url_edit = QLineEdit()
-        self.url_edit.setMinimumHeight(28)
+        self.url_edit.setMinimumHeight(32)
         self.url_edit.setPlaceholderText("RTMP URL (auto-filled for known platforms)")
         
         self.key_edit = QLineEdit()
-        self.key_edit.setMinimumHeight(28)
+        self.key_edit.setMinimumHeight(32)
         self.key_edit.setPlaceholderText("Enter your stream key here")
         self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         
@@ -227,26 +229,41 @@ class StreamingSettingsDialog(QDialog):
         self.show_key_btn = show_key_btn
         
         self.platform_label = QLabel("Platform:")
-        conn_layout.addWidget(self.platform_label, 0, 0)
-        conn_layout.addWidget(self.platform, 0, 1, 1, 2)
+        self.conn_layout.addWidget(self.platform_label, 0, 0)
+        self.conn_layout.addWidget(self.platform, 0, 1, 1, 2)
         self.url_label = QLabel("Stream URL:")
-        conn_layout.addWidget(self.url_label, 1, 0)
-        conn_layout.addWidget(self.url_edit, 1, 1, 1, 2)
+        self.conn_layout.addWidget(self.url_label, 1, 0)
+        self.conn_layout.addWidget(self.url_edit, 1, 1, 1, 2)
         self.key_label = QLabel("Stream Key:")
-        conn_layout.addWidget(self.key_label, 2, 0)
-        conn_layout.addWidget(self.key_edit, 2, 1)
-        conn_layout.addWidget(show_key_btn, 2, 2)
+        self.conn_layout.addWidget(self.key_label, 2, 0)
+        self.conn_layout.addWidget(self.key_edit, 2, 1)
+        self.conn_layout.addWidget(show_key_btn, 2, 2)
 
         # Mirror mode helper info (shown only when External Display is selected)
         self.mirror_info = QLabel("Mirror your composed output to a selected external display.\nSelect the display below and click Start.")
         self.mirror_info.setWordWrap(True)
-        conn_layout.addWidget(self.mirror_info, 3, 0, 1, 3)
+        self.conn_layout.addWidget(self.mirror_info, 3, 0, 1, 3)
         
         # Direct Passthrough option (also used for RTMP to bypass compositing and stream media file directly)
         self.passthrough_check = QCheckBox("Direct Passthrough")
         self.passthrough_check.setToolTip("When enabled: \n- Mirror: send raw input/media to display.\n- RTMP: stream the current media file directly via FFmpeg (bypasses app compositing).")
         self.passthrough_check.setStyleSheet("QCheckBox { color: #bbbbbb; }")
-        conn_layout.addWidget(self.passthrough_check, 4, 0, 1, 3)
+        self.conn_layout.addWidget(self.passthrough_check, 4, 0, 1, 3)
+
+        # Display selection for mirror mode (shown on Connection tab)
+        self.display_label = QLabel("Display:")
+        self.display_combo = QComboBox()
+        self.display_combo.setMinimumHeight(28)
+        self.refresh_displays_btn = QPushButton("Refresh")
+        self.refresh_displays_btn.setToolTip("Re-detect connected displays")
+        self.refresh_displays_btn.setMinimumHeight(28)
+        self.refresh_displays_btn.clicked.connect(self._populate_displays)
+        self._display_row_conn = QHBoxLayout()
+        self._display_row_conn.setSpacing(6)
+        self._display_row_conn.addWidget(self.display_combo)
+        self._display_row_conn.addWidget(self.refresh_displays_btn)
+        self.conn_layout.addWidget(self.display_label, 5, 0)
+        self.conn_layout.addLayout(self._display_row_conn, 5, 1, 1, 2)
         
         # Style the mirror info and passthrough check
         for widget in [self.mirror_info, self.passthrough_check]:
@@ -256,19 +273,16 @@ class StreamingSettingsDialog(QDialog):
         # Keep passthrough visible for all platforms (mirror and RTMP)
         self.passthrough_check.setVisible(True)
 
-        # Video Settings Group
-        video_group = QGroupBox("Video Settings")
-        video_layout = QGridLayout(video_group)
-        self.video_group = video_group
-        
-        self.display_combo = QComboBox()
-        self.display_combo.setMinimumHeight(28)
-        # Add a manual refresh button for displays
-        self.refresh_displays_btn = QPushButton("Refresh")
-        self.refresh_displays_btn.setToolTip("Re-detect connected displays")
-        self.refresh_displays_btn.setMinimumHeight(28)
-        self.refresh_displays_btn.clicked.connect(self._populate_displays)
-        
+        self.display_label.setVisible(False)
+        self.display_combo.setVisible(False)
+        self.refresh_displays_btn.setVisible(False)
+
+        # Video Settings Page
+        self.video_page = QWidget()
+        video_layout = QGridLayout(self.video_page)
+        video_layout.setContentsMargins(12, 12, 12, 12)
+        video_layout.setSpacing(12)
+
         self.res_combo = QComboBox()
         self.res_combo.setMinimumHeight(28)
         for w, h, desc in RESOLUTIONS:
@@ -288,47 +302,76 @@ class StreamingSettingsDialog(QDialog):
         self.bitrate_spin.setSuffix(" kbps")
         self.bitrate_spin.setEnabled(False)
         
-        # Store Display label and row so we can toggle visibility per platform
-        self.display_label = QLabel("Display:")
-        video_layout.addWidget(self.display_label, 0, 0)
-        # Place combo and refresh button in a small row
-        self.display_row = QHBoxLayout()
-        self.display_row.setSpacing(6)
-        self.display_row.addWidget(self.display_combo)
-        self.display_row.addWidget(self.refresh_displays_btn)
-        video_layout.addLayout(self.display_row, 0, 1)
         self.res_label = QLabel("Resolution:")
-        video_layout.addWidget(self.res_label, 1, 0)
-        video_layout.addWidget(self.res_combo, 1, 1)
+        video_layout.addWidget(self.res_label, 0, 0)
+        video_layout.addWidget(self.res_combo, 0, 1)
         self.fps_label = QLabel("Framerate:")
-        video_layout.addWidget(self.fps_label, 2, 0)
-        video_layout.addWidget(self.fps_combo, 2, 1)
-        video_layout.addWidget(self.auto_bitrate_check, 3, 0, 1, 1)
-        video_layout.addWidget(self.bitrate_spin, 3, 1)
+        video_layout.addWidget(self.fps_label, 1, 0)
+        video_layout.addWidget(self.fps_combo, 1, 1)
+        video_layout.addWidget(self.auto_bitrate_check, 2, 0, 1, 1)
+        video_layout.addWidget(self.bitrate_spin, 2, 1)
 
-        # Audio Settings Group (BGM only)
-        audio_group = QGroupBox("Audio Settings")
-        audio_layout = QVBoxLayout(audio_group)
+        # Audio Settings Page (BGM)
+        self.audio_page = QWidget()
+        audio_layout = QVBoxLayout(self.audio_page)
+        audio_layout.setContentsMargins(0, 0, 0, 0)
+        audio_layout.setSpacing(0)
+
+        audio_scroll = QScrollArea()
+        audio_scroll.setWidgetResizable(True)
+        audio_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        audio_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         try:
-            audio_layout.setContentsMargins(12, 10, 12, 10)
-            audio_layout.setSpacing(12)
+            audio_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         except Exception:
             pass
-        self.audio_group = audio_group
-        try:
-            self.audio_group.setMinimumHeight(160)
-            self.audio_group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        except Exception:
-            pass
 
-        # Background Music (BGM) Group - Enhanced Playlist Audio Section
-        bgm_group = QGroupBox("🎵 Background Music Player")
+        audio_inner = QWidget()
+        audio_inner_layout = QVBoxLayout(audio_inner)
+        audio_inner_layout.setContentsMargins(12, 12, 12, 12)
+        audio_inner_layout.setSpacing(12)
+
+        audio_scroll.setWidget(audio_inner)
+        audio_layout.addWidget(audio_scroll)
+
+        # Stream Microphone - include mic in stream (default ON so users get audio)
+        mic_group = QFrame()
+        mic_group.setObjectName("micPanel")
+        mic_group.setStyleSheet("QFrame#micPanel{background-color:#1e1e1e;border:1px solid #333333;border-radius:8px;}")
+        mic_layout = QVBoxLayout(mic_group)
+        mic_layout.setSpacing(8)
+        mic_layout.setContentsMargins(12, 10, 12, 10)
+        self.mic_check = QCheckBox("🎤 Include microphone in stream")
+        self.mic_check.setChecked(True)
+        self.mic_check.setToolTip("Capture your microphone and mix it into the stream. Disable for silent stream.")
+        self.mic_check.setStyleSheet("QCheckBox{font-weight:600;color:#4fc3f7;}")
+        self.mic_check.toggled.connect(self._on_mic_toggled)
+        mic_layout.addWidget(self.mic_check)
+        mic_row = QHBoxLayout()
+        mic_row.addWidget(QLabel("Microphone:"))
+        self.mic_dev_combo = QComboBox()
+        self.mic_dev_combo.setMinimumHeight(28)
+        self.mic_dev_combo.addItem("Default (Auto-detect)", "")
+        mic_refresh = QPushButton("Refresh")
+        mic_refresh.clicked.connect(self._populate_mic_devices)
+        mic_row.addWidget(self.mic_dev_combo, 1)
+        mic_row.addWidget(mic_refresh)
+        mic_layout.addLayout(mic_row)
+        audio_inner_layout.addWidget(mic_group)
+
+        # Background Music (BGM) - Enhanced Playlist Audio Section
+        # Use a plain frame (no big inner heading) since this content already lives inside a tab.
+        bgm_group = QFrame()
+        bgm_group.setObjectName("bgmPanel")
+        bgm_group.setStyleSheet(
+            "QFrame#bgmPanel{background-color:#1e1e1e;border:1px solid #333333;border-radius:8px;}"
+        )
         bgm_layout = QVBoxLayout(bgm_group)
-        bgm_layout.setSpacing(12)
-        bgm_layout.setContentsMargins(16, 16, 16, 16)
+        bgm_layout.setSpacing(10)
+        bgm_layout.setContentsMargins(12, 10, 12, 10)
         
         try:
-            bgm_group.setMinimumHeight(180)
+            bgm_group.setMinimumHeight(0)
             bgm_group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         except Exception:
             pass
@@ -336,7 +379,7 @@ class StreamingSettingsDialog(QDialog):
         # Enable BGM with modern toggle
         self.bgm_enable_check = QCheckBox("🎧 Enable Background Music (replaces program audio)")
         self.bgm_enable_check.setChecked(False)
-        self.bgm_enable_check.setMinimumHeight(32)
+        self.bgm_enable_check.setMinimumHeight(28)
         self.bgm_enable_check.setStyleSheet("""
             QCheckBox {
                 font-size: 13px;
@@ -353,6 +396,7 @@ class StreamingSettingsDialog(QDialog):
         
         # Playlist header with info
         playlist_header = QHBoxLayout()
+        playlist_header.setSpacing(8)
         playlist_label = QLabel("📋 Playlist")
         playlist_label.setStyleSheet("font-weight: bold; color: #ffffff; font-size: 12px;")
         self.playlist_count_label = QLabel("0 tracks")
@@ -367,14 +411,14 @@ class StreamingSettingsDialog(QDialog):
         self.bgm_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
         self.bgm_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.bgm_list.setAlternatingRowColors(True)
-        self.bgm_list.setMinimumHeight(150)
+        self.bgm_list.setMinimumHeight(130)
         self.bgm_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.bgm_list.setStyleSheet("""
             QListWidget {
                 font-size: 12px;
             }
             QListWidget::item {
-                padding: 10px;
+                padding: 8px;
                 border-left: 3px solid transparent;
             }
             QListWidget::item:selected {
@@ -387,9 +431,19 @@ class StreamingSettingsDialog(QDialog):
         # Control buttons row
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
+
+        btn_compact = """
+            QPushButton {
+                border-radius: 10px;
+                padding: 6px 10px;
+                font-weight: 700;
+                font-size: 12px;
+                min-height: 28px;
+            }
+        """
         
-        self.bgm_add_btn = QPushButton("➕ Add Files")
-        self.bgm_add_btn.setMinimumHeight(32)
+        self.bgm_add_btn = QPushButton("➕ Add")
+        self.bgm_add_btn.setMinimumHeight(28)
         self.bgm_add_btn.setStyleSheet("""
             QPushButton {
                 background-color: #2e7d32;
@@ -398,11 +452,11 @@ class StreamingSettingsDialog(QDialog):
             QPushButton:hover {
                 background-color: #388e3c;
             }
-        """)
+        """ + btn_compact)
         self.bgm_add_btn.clicked.connect(self._add_bgm_files)
         
         self.bgm_remove_btn = QPushButton("🗑️ Remove")
-        self.bgm_remove_btn.setMinimumHeight(32)
+        self.bgm_remove_btn.setMinimumHeight(28)
         self.bgm_remove_btn.setStyleSheet("""
             QPushButton {
                 background-color: #c62828;
@@ -410,15 +464,16 @@ class StreamingSettingsDialog(QDialog):
             QPushButton:hover {
                 background-color: #d32f2f;
             }
-        """)
+        """ + btn_compact)
         self.bgm_remove_btn.clicked.connect(self._remove_bgm_files)
         
         self.bgm_shuffle_btn = QPushButton("🔀 Shuffle")
-        self.bgm_shuffle_btn.setMinimumHeight(32)
+        self.bgm_shuffle_btn.setMinimumHeight(28)
+        self.bgm_shuffle_btn.setStyleSheet(btn_compact + "QPushButton{background-color:#1565c0;} QPushButton:hover{background-color:#1e88e5;}")
         self.bgm_shuffle_btn.clicked.connect(self._shuffle_bgm_playlist)
         
-        self.bgm_clear_btn = QPushButton("🧹 Clear All")
-        self.bgm_clear_btn.setMinimumHeight(32)
+        self.bgm_clear_btn = QPushButton("🧹 Clear")
+        self.bgm_clear_btn.setMinimumHeight(28)
         self.bgm_clear_btn.setStyleSheet("""
             QPushButton {
                 background-color: #f57c00;
@@ -426,7 +481,7 @@ class StreamingSettingsDialog(QDialog):
             QPushButton:hover {
                 background-color: #fb8c00;
             }
-        """)
+        """ + btn_compact)
         self.bgm_clear_btn.clicked.connect(self._clear_bgm_files)
         
         btn_row.addWidget(self.bgm_add_btn)
@@ -445,7 +500,7 @@ class StreamingSettingsDialog(QDialog):
             }
         """)
         playback_layout = QVBoxLayout(playback_group)
-        playback_layout.setSpacing(10)
+        playback_layout.setSpacing(8)
         
         # Loop and shuffle options
         options_row = QHBoxLayout()
@@ -470,7 +525,7 @@ class StreamingSettingsDialog(QDialog):
         self.bgm_vol_slider = QSlider(Qt.Orientation.Horizontal)
         self.bgm_vol_slider.setRange(0, 100)
         self.bgm_vol_slider.setValue(50)
-        self.bgm_vol_slider.setMinimumWidth(150)
+        self.bgm_vol_slider.setMinimumWidth(130)
         self.bgm_vol_slider.valueChanged.connect(self._on_volume_changed)
         
         self.bgm_vol_label = QLabel("50%")
@@ -508,10 +563,10 @@ class StreamingSettingsDialog(QDialog):
         
         bgm_layout.addWidget(playback_group)
 
-        audio_layout.addWidget(bgm_group)
-        # Add stretch to ensure sufficient space below BGM group
+        audio_inner_layout.addWidget(bgm_group)
+        # Add stretch to keep content compact at top while allowing scroll if needed
         try:
-            audio_layout.addStretch(1)
+            audio_inner_layout.addStretch(1)
         except Exception:
             pass
 
@@ -520,16 +575,12 @@ class StreamingSettingsDialog(QDialog):
             pass
         except Exception:
             pass
-        # Advanced Settings Group
-        advanced_group = QGroupBox("Advanced Settings")
-        advanced_layout = QGridLayout(advanced_group)
-        self.advanced_group = advanced_group
-        try:
-            advanced_layout.setContentsMargins(10, 8, 10, 10)
-            advanced_layout.setHorizontalSpacing(8)
-            advanced_layout.setVerticalSpacing(8)
-        except Exception:
-            pass
+        # Advanced Settings Page
+        self.advanced_page = QWidget()
+        advanced_layout = QGridLayout(self.advanced_page)
+        advanced_layout.setContentsMargins(12, 12, 12, 12)
+        advanced_layout.setHorizontalSpacing(12)
+        advanced_layout.setVerticalSpacing(12)
         
         self.preset_combo = QComboBox()
         self.preset_combo.addItems(PRESETS)
@@ -577,10 +628,12 @@ class StreamingSettingsDialog(QDialog):
         # Control Buttons
         button_layout = QHBoxLayout()
         self.test_btn = QPushButton("Test Connection")
+        self.probe_btn = QPushButton("Send 10s Test")
         self.start_btn = QPushButton("Start Streaming")
         self.stop_btn = QPushButton("Stop Streaming")
         
         self.test_btn.setMinimumHeight(30)
+        self.probe_btn.setMinimumHeight(30)
         self.start_btn.setMinimumHeight(30)
         self.stop_btn.setMinimumHeight(30)
         
@@ -615,6 +668,7 @@ class StreamingSettingsDialog(QDialog):
         self.stop_btn.setEnabled(False)
         
         button_layout.addWidget(self.test_btn)
+        button_layout.addWidget(self.probe_btn)
         button_layout.addStretch()
         button_layout.addWidget(self.start_btn)
         button_layout.addWidget(self.stop_btn)
@@ -631,60 +685,21 @@ class StreamingSettingsDialog(QDialog):
         self.log_view.setMaximumHeight(100)
         self.log_view.setStyleSheet("QTextEdit { background-color: #2b2b2b; color: #ffffff; font-family: monospace; }")
 
-        # Add groups into tabs for a more compact UI
+        # Logs Page
+        logs_page = QWidget()
+        logs_layout = QVBoxLayout(logs_page)
+        logs_layout.setContentsMargins(12, 12, 12, 12)
+        logs_layout.addWidget(self.conn_status)
+        logs_layout.addWidget(log_label)
+        logs_layout.addWidget(self.log_view)
+        
+        # Consolidate Tabs
         tabs = QTabWidget()
-
-        # Connection tab
-        conn_tab = QWidget()
-        conn_tab_layout = QVBoxLayout(conn_tab)
-        conn_tab_layout.addWidget(conn_group)
-        try:
-            conn_tab_layout.addStretch(1)
-        except Exception:
-            pass
-        tabs.addTab(conn_tab, "Connection")
-
-        # Video tab
-        video_tab = QWidget()
-        video_tab_layout = QVBoxLayout(video_tab)
-        video_tab_layout.addWidget(video_group)
-        try:
-            video_tab_layout.addStretch(1)
-        except Exception:
-            pass
-        tabs.addTab(video_tab, "Video")
-
-        # Audio tab
-        audio_tab = QWidget()
-        audio_tab_layout = QVBoxLayout(audio_tab)
-        audio_tab_layout.addWidget(audio_group)
-        try:
-            audio_tab_layout.addStretch(1)
-        except Exception:
-            pass
-        tabs.addTab(audio_tab, "Audio")
-
-        # Advanced tab
-        adv_tab = QWidget()
-        adv_tab_layout = QVBoxLayout(adv_tab)
-        adv_tab_layout.addWidget(advanced_group)
-        try:
-            adv_tab_layout.addStretch(1)
-        except Exception:
-            pass
-        tabs.addTab(adv_tab, "Advanced")
-
-        # Logs tab
-        logs_tab = QWidget()
-        logs_tab_layout = QVBoxLayout(logs_tab)
-        logs_tab_layout.addWidget(self.conn_status)
-        logs_tab_layout.addWidget(log_label)
-        logs_tab_layout.addWidget(self.log_view)
-        try:
-            logs_tab_layout.addStretch(1)
-        except Exception:
-            pass
-        tabs.addTab(logs_tab, "Logs")
+        tabs.addTab(self.conn_page, "Connection")
+        tabs.addTab(self.video_page, "Video")
+        tabs.addTab(self.audio_page, "BGM")
+        tabs.addTab(self.advanced_page, "Advanced")
+        tabs.addTab(logs_page, "Logs")
 
         layout.addWidget(tabs)
         layout.addLayout(button_layout)
@@ -694,6 +709,7 @@ class StreamingSettingsDialog(QDialog):
         self.start_btn.clicked.connect(self._on_start)
         self.stop_btn.clicked.connect(self._on_stop)
         self.test_btn.clicked.connect(self._on_test)
+        self.probe_btn.clicked.connect(self._on_probe)
         # No device capture controls; audio is BGM-only here
         self.res_combo.currentIndexChanged.connect(self._update_recommended_bitrate)
         self.fps_combo.currentIndexChanged.connect(self._update_recommended_bitrate)
@@ -710,7 +726,7 @@ class StreamingSettingsDialog(QDialog):
                 app.screenRemoved.connect(lambda _s: self._populate_displays())
         except Exception:
             pass
-        # No audio devices to populate in BGM-only mode
+        self._populate_mic_devices()
         self._load_from_config()
         self._on_platform_changed(self.platform.currentText())
         # Initialize bitrate recommendation after controls are populated
@@ -743,6 +759,9 @@ class StreamingSettingsDialog(QDialog):
             self._sync_ui_with_state()
         except Exception:
             pass
+
+        # Internal: short FFmpeg probe process
+        self._probe_proc: QProcess | None = None
 
     def showEvent(self, event):
         try:
@@ -814,13 +833,28 @@ class StreamingSettingsDialog(QDialog):
             self.sender().setText("Show")
 
     def _append_log(self, text: str):
-        self.log_view.append(text.rstrip())
-        self.log_view.ensureCursorVisible()
-        t = text.lower()
-        # Detect when output starts (connected to RTMP)
-        if "output #0, flv, to" in t or "writing header" in t:
-            self.conn_status.setText("Connected: sending frames. Open YouTube Live Control Room and click 'Go Live'.")
-            self.conn_status.setStyleSheet("QLabel { color: #00d084; font-weight: bold; }")
+        # Echo to terminal so user sees FFmpeg output when streaming
+        try:
+            if text:
+                print(text, end='' if text.endswith('\n') else '\n')
+        except Exception:
+            pass
+        try:
+            # Performance optimization: limit log size
+            if self.log_view.document().characterCount() > 50000:
+                cursor = self.log_view.textCursor()
+                cursor.select(cursor.SelectionType.Document)
+                cursor.removeSelectedText()
+                self.log_view.append("--- Log Truncated ---")
+            self.log_view.append(text.rstrip())
+            self.log_view.ensureCursorVisible()
+            t = text.lower()
+            # Detect when output starts (connected to RTMP)
+            if "output #0, flv, to" in t or "writing header" in t:
+                self.conn_status.setText("Connected: sending frames. Open YouTube Live Control Room and click 'Go Live'.")
+                self.conn_status.setStyleSheet("QLabel { color: #00d084; font-weight: bold; }")
+        except Exception:
+            pass  # Widget may be destroyed if dialog closed while streaming
 
     def _populate_displays(self):
         # Preserve current selection if possible
@@ -917,7 +951,37 @@ class StreamingSettingsDialog(QDialog):
             self.display_combo.blockSignals(False)
 
     def _populate_audio_devices(self):
-        pass  # Removed: BGM-only mode
+        self._populate_mic_devices()
+
+    def _populate_mic_devices(self):
+        """Populate microphone dropdown for stream audio capture."""
+        try:
+            current = self.mic_dev_combo.currentData() if self.mic_dev_combo.count() > 0 else None
+            self.mic_dev_combo.clear()
+            self.mic_dev_combo.addItem("Default (Auto-detect)", "")
+            import sys as _sys
+            if _sys.platform.startswith('win'):
+                try:
+                    from recording_settings_dialog import _list_windows_audio_devices
+                    devices = _list_windows_audio_devices()
+                    for fname, _alt in devices:
+                        display = fname.replace('Â®', '®').replace('Â', '') if isinstance(fname, str) else str(fname)
+                        self.mic_dev_combo.addItem(f"🎤 {display}", fname)
+                except Exception as e:
+                    print(f"[Stream] Could not list audio devices: {e}")
+            # Restore selection
+            if current is not None:
+                idx = self.mic_dev_combo.findData(current)
+                if idx >= 0:
+                    self.mic_dev_combo.setCurrentIndex(idx)
+        except Exception as e:
+            print(f"[Stream] Error populating mic devices: {e}")
+
+    def _on_mic_toggled(self, checked: bool):
+        try:
+            self.mic_dev_combo.setEnabled(checked)
+        except Exception:
+            pass
 
     def _on_platform_changed(self, name: str):
         tmpl = PLATFORMS.get(name, {})
@@ -955,7 +1019,7 @@ class StreamingSettingsDialog(QDialog):
         except Exception:
             pass
         # In mirror mode, allow selecting an audio OUTPUT device to route audio to HDMI
-        self.audio_group.setEnabled(True)
+        # self.audio_group.setEnabled(True) # Removed: audio_group deprecated
         # For non-custom RTMP platforms, prefill URL
         if name not in ("Custom RTMP", "External Display (Mirror)"):
             self.url_edit.setText(tmpl.get("url", ""))
@@ -963,6 +1027,12 @@ class StreamingSettingsDialog(QDialog):
             self.url_edit.setText("")
         # Refresh recommended bitrate when platform changes back to RTMP mode
         self._update_recommended_bitrate()
+
+        if is_mirror:
+            try:
+                self._populate_displays()
+            except Exception:
+                pass
 
     def _on_audio_toggled(self, checked: bool):
         try:
@@ -1012,6 +1082,7 @@ class StreamingSettingsDialog(QDialog):
         key = (self.key_edit.text() or "").strip()
         if not url or not key:
             return ""
+        # Do not force RTMPS: honor exactly what the user provided (rtmp or rtmps)
         if key and not url.endswith(key):
             joiner = '' if url.endswith('/') else '/'
             return f"{url}{joiner}{key}"
@@ -1037,9 +1108,8 @@ class StreamingSettingsDialog(QDialog):
             'screen_index': int(screen_index),
             'direct_passthrough': self.passthrough_check.isChecked(),
             'mirror_mode': self.platform.currentText() == "External Display (Mirror)",
-            # Device capture disabled in BGM-only mode
-            'capture_audio': False,
-            'audio_device': '',
+            'capture_audio': bool(self.mic_check.isChecked()) if not self.bgm_enable_check.isChecked() else False,
+            'audio_device': (self.mic_dev_combo.currentData() or '') if self.mic_check.isChecked() and not self.bgm_enable_check.isChecked() else '',
             'video_preset': self.preset_combo.currentText(),
             'crf': int(self.crf_spin.value()),
             'av_sync_delay_ms': int(self.avsync_spin.value()),
@@ -1080,7 +1150,14 @@ class StreamingSettingsDialog(QDialog):
                 self.fps_combo.setCurrentIndex(i)
                 break
         
-        # No capture audio settings in BGM-only mode
+        # Stream microphone
+        self.mic_check.setChecked(bool(self._config.get(f'{prefix}.capture_audio', True)))
+        saved_dev = (self._config.get(f'{prefix}.audio_device', '') or '').strip()
+        if saved_dev:
+            idx = self.mic_dev_combo.findData(saved_dev)
+            if idx >= 0:
+                self.mic_dev_combo.setCurrentIndex(idx)
+        self.mic_dev_combo.setEnabled(self.mic_check.isChecked())
         
         # Advanced
         preset = self._config.get(f'{prefix}.video_preset', 'veryfast')
@@ -1088,7 +1165,7 @@ class StreamingSettingsDialog(QDialog):
         self.preset_combo.setCurrentIndex(pvidx if pvidx >= 0 else 2)
         self.crf_spin.setValue(int(self._config.get(f'{prefix}.crf', 20)))
         # Default av sync delay minimized to prevent delay buildup
-        self.avsync_spin.setValue(int(self._config.get(f'{prefix}.av_sync_delay_ms', 50)))
+        self.avsync_spin.setValue(int(self._config.get(f'{prefix}.av_sync_delay_ms', 0)))
         # Master clock backend default: True
         try:
             use_av_master = bool(self._config.get(f'{prefix}.use_av_master_clock', True))
@@ -1125,6 +1202,8 @@ class StreamingSettingsDialog(QDialog):
             self.bgm_vol_spin.setValue(max(0, min(100, bgm_volume)))
             # Sync slider with loaded volume
             self.bgm_vol_slider.setValue(max(0, min(100, bgm_volume)))
+            # Sync mic enable state (BGM disables mic)
+            self._on_bgm_toggled(bgm_enabled)
         except Exception:
             pass
 
@@ -1310,6 +1389,12 @@ class StreamingSettingsDialog(QDialog):
             print(f"Error updating now playing: {e}")
 
     def _on_bgm_toggled(self, checked: bool):
+        # When BGM is on, mic is irrelevant (BGM replaces all program audio)
+        try:
+            self.mic_check.setEnabled(not checked)
+            self.mic_dev_combo.setEnabled(not checked and self.mic_check.isChecked())
+        except Exception:
+            pass
         # When turning on BGM, auto-mute all sources via main window's global audio button if available
         if checked:
             try:
@@ -1359,8 +1444,84 @@ class StreamingSettingsDialog(QDialog):
         QMessageBox.information(self, "Connection Test", 
                               f"URL constructed successfully:\n{url}\n\nNote: Actual connection test requires FFmpeg to attempt streaming.")
 
+    def _on_probe(self):
+        """Send a 10s synthetic test stream (black video + silence) to the URL.
+        This isolates network/ingest issues from rendering.
+        """
+        if not self._validate():
+            return
+        try:
+            (w, h) = self.res_combo.currentData()
+            fps = int(self.fps_combo.currentData())
+        except Exception:
+            w, h, fps = 1920, 1080, 30
+        url = self._resolve_url()
+        if not url:
+            QMessageBox.warning(self, "Test Error", "Final URL is empty.")
+            return
+
+        # Choose bitrate
+        try:
+            if self.auto_bitrate_check.isChecked():
+                br = self._recommended_bitrate_kbps(w, h, fps)
+            else:
+                br = max(500, int(self.bitrate_spin.value()))
+        except Exception:
+            br = 5000
+
+        # Resolve ffmpeg path
+        try:
+            from ffmpeg_utils import get_ffmpeg_path, verify_ffmpeg  # type: ignore
+            ff = get_ffmpeg_path()
+            try:
+                ok = verify_ffmpeg(ff)
+            except Exception:
+                ok = False
+            if not ok:
+                ff = 'ffmpeg'
+        except Exception:
+            ff = 'ffmpeg'
+
+        # Build command
+        gop = max(2, fps * 2)
+        bv = f"{br}k"
+        args = [
+            '-hide_banner','-loglevel','info',
+            '-re','-f','lavfi','-r',str(fps),'-i',f"color=size={w}x{h}:color=black",
+            '-f','lavfi','-i','anullsrc=cl=stereo:r=48000',
+            '-map','0:v:0','-map','1:a:0',
+            '-c:v','libx264','-preset',self.preset_combo.currentText(),'-tune','zerolatency',
+            '-g',str(gop),'-keyint_min',str(gop),'-sc_threshold','0',
+            '-pix_fmt','yuv420p',
+            '-b:v',bv,'-maxrate',bv,'-bufsize',f"{2*br}k",
+            '-c:a','aac','-b:a','128k','-ar','48000','-ac','2',
+            '-shortest','-t','10','-flvflags','no_duration_filesize',
+            '-f','flv',url
+        ]
+
+        # Launch QProcess
+        try:
+            if self._probe_proc is not None and self._probe_proc.state() != QProcess.ProcessState.NotRunning:
+                try:
+                    self._probe_proc.kill()
+                except Exception:
+                    pass
+            self._probe_proc = QProcess(self)
+            self._probe_proc.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
+            self._probe_proc.readyReadStandardError.connect(lambda: self._append_log(bytes(self._probe_proc.readAllStandardError()).decode('utf-8', errors='ignore')))
+            self._probe_proc.finished.connect(lambda _c,_s: self.log_view.append("Test ended."))
+            self.log_view.clear()
+            self.log_view.append("Sending 10s synthetic test to YouTube...")
+            self._probe_proc.start(ff, args)
+            if not self._probe_proc.waitForStarted(5000):
+                QMessageBox.critical(self, "Test Error", "Failed to start FFmpeg test process.")
+                return
+        except Exception as e:
+            QMessageBox.critical(self, "Test Error", f"Failed to run test: {e}")
+
     def _on_start(self):
         if not self._validate():
+            print("[STREAM] Start aborted: validation failed")
             return
         
         self._save_settings()
@@ -1387,6 +1548,8 @@ class StreamingSettingsDialog(QDialog):
                     settings['nsscreen_rects'] = self._nsscreen_rects
                 # Mirror should auto-maximize and use parent's current preview fps
                 settings['maximize'] = True
+                # Use native display pixel resolution for best HDMI quality
+                settings['mode'] = 'display'
                 try:
                     # Prefer parent's graphics output target fps stored in config
                     from config import app_config as _cfg
@@ -1414,9 +1577,12 @@ class StreamingSettingsDialog(QDialog):
                     self.test_btn.setEnabled(False)
                     if hasattr(self._parent, 'update_record_status'):
                         self._parent.update_record_status(f"Mirroring (Stream {self._stream_id})", "#00aa00")
+                    print(f"[STREAM] Mirror mode started successfully for Stream {self._stream_id}")
                 else:
+                    print("[STREAM] ERROR: Mirror controller not available")
                     QMessageBox.critical(self, "Error", "Mirror controller not available.")
             except Exception as e:
+                print(f"[STREAM] ERROR: Failed to start mirroring: {e}")
                 QMessageBox.critical(self, "Mirror Error", f"Failed to start mirroring:\n{str(e)}")
                 self.log_view.append(f"ERROR: {str(e)}")
             return
@@ -1438,6 +1604,7 @@ class StreamingSettingsDialog(QDialog):
             pass
         
         try:
+            print(f"[STREAM] Start streaming clicked for Stream {self._stream_id}...")
             self.log_view.clear()
             self.log_view.append("Starting stream...")
             # Use independent controller for this stream
@@ -1453,9 +1620,12 @@ class StreamingSettingsDialog(QDialog):
                 # Update main window status
                 if hasattr(self._parent, 'update_record_status'):
                     self._parent.update_record_status(f"Streaming {self._stream_id}", "#00aa00")
+                print(f"[STREAM] Stream {self._stream_id} started successfully")
             else:
+                print(f"[STREAM] ERROR: Streaming controller for Stream {self._stream_id} not available (see logs above for details)")
                 QMessageBox.critical(self, "Error", f"Streaming controller for Stream {self._stream_id} not available.")
         except Exception as e:
+            print(f"[STREAM] ERROR: Failed to start Stream {self._stream_id}: {e}")
             QMessageBox.critical(self, "Streaming Error", f"Failed to start streaming:\n{str(e)}")
             self.log_view.append(f"ERROR: {str(e)}")
 
@@ -1490,3 +1660,18 @@ class StreamingSettingsDialog(QDialog):
                 self._parent.update_record_status("Ready", "#777777")
         except Exception as e:
             QMessageBox.warning(self, "Stop Error", f"Failed to stop cleanly: {str(e)}")
+
+class StreamingSettingsDialog(QDialog):
+    def __init__(self, parent, stream_id: int, app_config):
+        super().__init__(parent)
+        self.setWindowTitle(f"🎬 Stream {stream_id} Settings")
+        self.setModal(True)
+        self.setMinimumSize(600, 560)
+        self.setStyleSheet("QDialog { background-color: #121212; color: #ffffff; }")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Pass 'parent' to panel as the logic controller
+        self.panel = StreamingSettingsPanel(parent, stream_id, app_config)
+        layout.addWidget(self.panel)

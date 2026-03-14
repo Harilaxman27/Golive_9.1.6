@@ -3,10 +3,31 @@ import subprocess
 import threading
 import sys as _sys
 import os
+import time as _time
+import traceback
 import shutil
-from typing import Dict, Optional, Callable
+import tempfile
+import queue
+from typing import Dict, Optional, Callable, List
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer, QProcess, QSize
 from PyQt6.QtGui import QImage, QPainter
+
+# Import error handler
+try:
+    from error_handler import get_error_handler, ErrorSeverity
+except ImportError:
+    # Fallback if error_handler not available
+    def get_error_handler():
+        return None
+    class ErrorSeverity:
+        ERROR = "ERROR"
+        WARNING = "WARNING"
+
+# Import encoder selector
+try:
+    from encoder.encoder_selector import get_encoder_selector
+except ImportError:
+    get_encoder_selector = None
 
 # Import FFmpeg path resolver
 try:
@@ -27,9 +48,210 @@ except ImportError:
             return False
 
 
+def _diag_error(context: str, error: Exception, extra: str = ""):
+    """Pinpoints exactly where an error occurred with full context."""
+    tb = traceback.extract_tb(error.__traceback__)
+    if tb:
+        last = tb[-1]
+        file_short = os.path.basename(last.filename)
+        line = last.lineno
+        func = last.name
+        print(f"\n{'='*60}")
+        print(f"[ERROR] ❌ {context}")
+        print(f"[ERROR]    File    : {file_short} (full: {last.filename})")
+        print(f"[ERROR]    Line    : {line}")
+        print(f"[ERROR]    Function: {func}")
+        print(f"[ERROR]    Type    : {type(error).__name__}")
+        print(f"[ERROR]    Message : {error}")
+        if extra:
+            print(f"[ERROR]    Context : {extra}")
+        print(f"[ERROR]    Stack trace:")
+        for frame in tb:
+            print(f"[ERROR]      → {os.path.basename(frame.filename)}:"
+                  f"{frame.lineno} in {frame.name}")
+        print(f"{'='*60}\n")
+    else:
+        print(f"[ERROR] ❌ {context}: {type(error).__name__}: {error}")
+
+
+class StreamFrameQueue:
+    """
+    Fix 8B: Bounded frame queue for streaming output with rate limiting.
+    Decouples render thread from FFmpeg pipe to prevent backpressure.
+    Uses absolute nanosecond deadline timing (OBS-style precision).
+    """
+    def __init__(self, target_fps, max_queue_size=3):
+        self._queue = queue.Queue(maxsize=max_queue_size)
+        self._target_fps = target_fps
+        self._frame_interval_ns = int(1_000_000_000 / target_fps)
+        self._running = False
+        self._process = None
+        self._writer_thread = None
+        self._last_frame = None
+
+    def start(self, process, target_fps, log_cb=None):
+        """Start the rate-limited writer thread."""
+        self._process = process
+        self._target_fps = target_fps
+        self._frame_interval_ns = int(1_000_000_000 / target_fps)
+        self._running = True
+        self._log_cb = log_cb
+        self._writer_thread = threading.Thread(
+            target=self._write_loop, daemon=True, name="StreamPipeWriter"
+        )
+        self._writer_thread.start()
+        if log_cb:
+            log_cb(f"[STREAM] Frame queue started at {target_fps}fps\n")
+
+    def put_frame(self, frame_bytes):
+        """Non-blocking — drops oldest frame if queue is full (Fix 8B)."""
+        try:
+            self._queue.put_nowait(frame_bytes)
+        except queue.Full:
+            try:
+                self._queue.get_nowait()
+                self._queue.put_nowait(frame_bytes)
+                if hasattr(self, '_log_cb') and self._log_cb:
+                    self._log_cb("[STREAM] Queue full, dropped oldest frame to prevent backpressure\n")
+            except queue.Empty:
+                pass
+
+    def _write_loop(self):
+        """Writes frames to FFmpeg pipe at EXACTLY target_fps using absolute deadline timing."""
+        # === DIAGNOSTIC COUNTERS ===
+        _stream_frame_count = 0
+        _stream_period_count = 0
+        _stream_start_time = _time.monotonic()
+        _stream_last_report_time = _time.monotonic()
+        _stream_last_frame_time = _time.monotonic()
+        _stream_dropped_frames = 0
+        _stream_consecutive_errors = 0
+        _stream_max_frame_interval_ms = 0.0
+        
+        frame_interval_ns = self._frame_interval_ns
+        next_frame_ns = _time.perf_counter_ns()
+        last_frame = None
+
+        while self._running:
+            # Step 1: Advance absolute deadline
+            next_frame_ns += frame_interval_ns
+
+            # Step 2: Get next frame (or reuse last if none available)
+            try:
+                frame_bytes = self._queue.get_nowait()
+                last_frame = frame_bytes
+            except queue.Empty:
+                frame_bytes = last_frame  # Frame duplication for CFR
+
+            # Step 3: Write to pipe if we have a frame
+            if frame_bytes is not None and self._process is not None:
+                try:
+                    self._process.write(frame_bytes)
+                    
+                    # === DIAGNOSTIC ONLY ===
+                    _stream_frame_count += 1
+                    _stream_period_count += 1
+                    now = _time.monotonic()
+                    frame_interval_ms = (now - _stream_last_frame_time) * 1000
+                    _stream_last_frame_time = now
+                    _stream_consecutive_errors = 0  # reset on success
+                    
+                    # Track worst-case jitter
+                    if frame_interval_ms > _stream_max_frame_interval_ms:
+                        _stream_max_frame_interval_ms = frame_interval_ms
+                    
+                    # Warn if single frame took too long (jitter spike)
+                    if frame_interval_ms > 100:  # >100ms between frames = visible stutter
+                        print(f"[STREAM] ⚠ JITTER SPIKE: frame took {frame_interval_ms:.1f}ms "
+                              f"(frame #{_stream_frame_count}) "
+                              f"| streaming.py → writer loop")
+                    
+                    # Report every 5 seconds
+                    if now - _stream_last_report_time >= 5.0:
+                        elapsed = now - _stream_start_time
+                        avg_fps = _stream_frame_count / elapsed if elapsed > 0 else 0
+                        period_fps = _stream_period_count / 5.0
+                        fps_status = "✅" if period_fps >= 28 else "⚠" if period_fps >= 20 else "❌"
+                        print(f"[STREAM] {fps_status} Delivering: {avg_fps:.2f}fps avg | "
+                              f"Last 5s: {period_fps:.1f}fps | "
+                              f"Total: {_stream_frame_count} frames | "
+                              f"Dropped: {_stream_dropped_frames} | "
+                              f"Worst jitter: {_stream_max_frame_interval_ms:.1f}ms")
+                        _stream_last_report_time = now
+                        _stream_period_count = 0
+                        _stream_max_frame_interval_ms = 0.0  # reset jitter tracker
+                    
+                except BrokenPipeError as e:
+                    _stream_consecutive_errors += 1
+                    _diag_error("FFmpeg pipe broke — FFmpeg may have crashed or stream disconnected",
+                                e, 
+                                f"Frame #{_stream_frame_count} | "
+                                f"File: streaming.py | "
+                                f"Consecutive errors: {_stream_consecutive_errors}")
+                    if _stream_consecutive_errors >= 3:
+                        print(f"[STREAM] ❌ FATAL: {_stream_consecutive_errors} consecutive pipe errors "
+                              f"— stream is dead | streaming.py")
+                        self._running = False
+                        break
+                    
+                except OSError as e:
+                    _stream_consecutive_errors += 1
+                    _diag_error("OS error writing to FFmpeg pipe",
+                                e,
+                                f"Frame #{_stream_frame_count} | "
+                                f"File: streaming.py | "
+                                f"errno: {e.errno}")
+                    
+                except Exception as e:
+                    _stream_consecutive_errors += 1
+                    _diag_error("Unexpected error in stream writer loop",
+                                e,
+                                f"Frame #{_stream_frame_count} | File: streaming.py")
+            elif frame_bytes is None:
+                # === DROPPED FRAME COUNTER ===
+                _stream_dropped_frames += 1
+                now_drop = _time.monotonic()
+                if _stream_dropped_frames % 10 == 0:
+                    print(f"[STREAM] ⚠ {_stream_dropped_frames} frames dropped | "
+                          f"streaming.py → frame provider returned None | "
+                          f"Elapsed: {now_drop - _stream_start_time:.1f}s")
+                if _stream_dropped_frames % 100 == 0:
+                    print(f"[STREAM] ❌ HIGH DROP COUNT: {_stream_dropped_frames} total drops — "
+                          f"check _provide_stream_frame() in main.py")
+
+            # Step 4: Precision sleep to absolute deadline
+            sleep_ns = next_frame_ns - _time.perf_counter_ns()
+            if sleep_ns > 1_000_000:
+                _time.sleep((sleep_ns - 1_000_000) / 1_000_000_000)
+                while _time.perf_counter_ns() < next_frame_ns:
+                    pass
+            elif sleep_ns > 0:
+                while _time.perf_counter_ns() < next_frame_ns:
+                    pass
+            elif sleep_ns < -frame_interval_ns:
+                next_frame_ns = _time.perf_counter_ns()
+
+    def stop(self):
+        """Stop the writer thread."""
+        self._running = False
+        if self._writer_thread and self._writer_thread.is_alive():
+            self._writer_thread.join(timeout=2.0)
+        if hasattr(self, '_log_cb') and self._log_cb:
+            self._log_cb("[STREAM] Frame queue stopped\n")
+
+
+
 class StreamController(QObject):
     """Streams program output by rendering frames and piping to FFmpeg via stdin.
-    {{ ... }}
+
+    A/V sync (from recording.py):
+      - probesize 32, analyzeduration 0: reduce startup analysis delay
+      - fflags +genpts+discardcorrupt+nobuffer: reduce pipe buffering
+      - thread_queue_size 512: smaller queue for video pipe and dshow audio
+      - setpts=PTS-STARTPTS on video: reset video PTS to align with audio
+      - asetpts=PTS-STARTPTS, aresample=async on audio
+      - -bf 0 -rc-lookahead 0 (libx264) / -bf 0 (NVENC/QSV): no B-frame buffer delay
+      - -fps_mode cfr: stable mux timestamps
 
     Usage:
       - set_frame_provider(callable returning QImage of target size)
@@ -70,6 +292,10 @@ class StreamController(QObject):
         # Reusable buffers
         self._frame_bytes: int = self._size.width() * self._size.height() * 4
         self._resize_canvas: Optional[QImage] = None
+        # A/V sync debug: throttle output-time logging
+        self._last_av_log_time: float = 0
+        # Fix 8B: Rate-limited frame queue
+        self._frame_queue: Optional[StreamFrameQueue] = None
 
     def set_frame_provider(self, provider: Callable[[QSize], QImage]):
         self._frame_provider = provider
@@ -142,7 +368,7 @@ class StreamController(QObject):
         if forced_codec:
             encoder = forced_codec
         else:
-            encoder = self._forced_encoder or self._select_best_h264_encoder()
+            encoder = self._forced_encoder or self._get_best_video_encoder()
 
         # Optional: use PyAV-based master clock backend for precise A/V sync
         use_av_master = bool(settings.get('use_av_master_clock', False))
@@ -178,7 +404,9 @@ class StreamController(QObject):
 
                 # Map: 1:v:0 (color video), 0:a:0 (audio file)
                 # Video must be H.264 yuv420p for YouTube RTMP
-                vopts = ['-map', '1:v:0', '-c:v', encoder if encoder != 'h264_nvenc' else 'libx264',
+                # For direct passthrough (FFmpeg-generated synthetic video), prefer CPU OR stable GPU encoders
+                direct_encoder = encoder if encoder in ['h264_qsv', 'h264_amf', 'h264_videotoolbox', 'libx264'] else 'libx264'
+                vopts = ['-map', '1:v:0', '-c:v', direct_encoder,
                          '-g', str(max(2, int(self._fps) * 2)), '-pix_fmt', 'yuv420p',
                          '-preset', preset, '-profile:v', 'high', '-level', '4.2',
                          '-b:v', f"{max(500, self._bitrate_kbps)}k", '-maxrate', f"{max(500, self._bitrate_kbps)}k",
@@ -189,7 +417,7 @@ class StreamController(QObject):
                     aopts += ['-c:a', 'copy']
                 else:
                     aopts += ['-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2']
-                tail = ['-flvflags', 'no_duration_filesize', '-vsync', '1', '-f', 'flv', '-rtmp_live', 'live', '-rw_timeout', '15000000', url]
+                tail = ['-flvflags', 'no_duration_filesize', '-vsync', 'vfr', '-f', 'flv', '-rtmp_live', 'live', '-rw_timeout', '15000000', url]  # Fix 8C
                 cmd = cmd + vopts + aopts + tail
             else:
                 # Video file. Attempt stream copy where compatible (common: H.264/AAC in MP4/MOV)
@@ -201,7 +429,7 @@ class StreamController(QObject):
                 # If ingest rejects, user can disable passthrough.
                 # Use optional audio map so files without audio don't error (-map 0:a:0?)
                 cmd += ['-map', '0:v:0', '-map', '0:a:0?', '-c:v', 'copy', '-c:a', 'copy',
-                        '-shortest', '-flvflags', 'no_duration_filesize', '-vsync', '1', '-f', 'flv', '-rtmp_live', 'live', '-rw_timeout', '15000000', url]
+                        '-shortest', '-flvflags', 'no_duration_filesize', '-vsync', 'vfr', '-f', 'flv', '-rtmp_live', 'live', '-rw_timeout', '15000000', url]  # Fix 8C
 
             # Launch QProcess using the same start logic as below
             try:
@@ -262,16 +490,26 @@ class StreamController(QObject):
                     self._log_cb(f"Failed to start PyAV backend, falling back to FFmpeg pipe: {e}\n")
                 # fall through to pipe mode
 
-        # Build ffmpeg command: read raw RGBA frames from stdin and push to RTMP
-        # genpts: generate timestamps for rawvideo pipe to help A/V sync
-        cmd = ['-loglevel', 'info', '-hide_banner', '-fflags', '+genpts']
-        # Video from stdin (program output)
-        cmd += ['-f', 'rawvideo', '-pix_fmt', 'rgba',
+        # Build ffmpeg command: read raw BGR24 frames from stdin and push to RTMP
+        # Fix 8A: Use BGR24 instead of RGBA (3 bytes/pixel vs 4 = 25% less bandwidth)
+        # A/V sync (from recording.py): probesize/analyzeduration reduce startup delay;
+        # fflags genpts+discardcorrupt+nobuffer reduce pipe buffering; thread_queue_size 512 = less buffer
+        cmd = [
+            '-loglevel', 'info', '-hide_banner',
+            '-probesize', '32',
+            '-analyzeduration', '0',
+            '-fflags', '+genpts+discardcorrupt+nobuffer',
+        ]
+        # Video from stdin (program output) - smaller queue = less latency, better sync
+        # Fix 8A: Changed from 'rgba' to 'bgr24' to reduce pipe bandwidth
+        cmd += ['-f', 'rawvideo', '-pix_fmt', 'bgr24',
+                '-thread_queue_size', '1024',
                 '-s', f'{self._size.width()}x{self._size.height()}',
                 '-r', str(self._fps), '-i', 'pipe:0']
         # Optional audio input (or generate silent audio if disabled)
         have_audio = False
-        # Compute A/V delay strategy: positive -> delay audio, negative -> delay video
+        # Compute A/V delay: positive -> delay audio, negative -> delay video.
+        # For MIC: audio is often behind (dshow buffer). Default 0 - do NOT delay audio further.
         try:
             audio_delay_ms = int(av_sync_delay_ms) if int(av_sync_delay_ms) > 0 else 0
         except Exception:
@@ -280,10 +518,11 @@ class StreamController(QObject):
             video_delay_ms = abs(int(av_sync_delay_ms)) if int(av_sync_delay_ms) < 0 else 0
         except Exception:
             video_delay_ms = 0
-        vfilter_str = ''
+        # A/V sync (from recording.py): Always reset video PTS to 0 to align with audio asetpts=PTS-STARTPTS.
+        # When video needs delay, add it on top of the reset.
+        vfilter_str = 'setpts=PTS-STARTPTS'
         if video_delay_ms > 0:
-            # Delay video by N ms relative to audio
-            vfilter_str = f"setpts=PTS+{video_delay_ms/1000.0:.3f}/TB"
+            vfilter_str = f"setpts=PTS-STARTPTS+{video_delay_ms/1000.0:.3f}/TB"
         # If BGM is enabled, we will mute program audio entirely (exclusive BGM)
         # Determine this BEFORE adding any audio inputs so we can skip non-BGM inputs.
         use_bgm = bool(bgm_enabled and len(bgm_playlist) > 0)
@@ -313,8 +552,14 @@ class StreamController(QObject):
                 cmd += ['-f', 'avfoundation', '-i', f':{idx}']
                 have_audio = True
             elif _sys.platform.startswith('win'):
-                # Use dshow audio device by name
-                cmd += ['-f', 'dshow', '-i', f'audio={audio_device}']
+                # Use dshow audio with large buffer
+                # Fix 8E: Increased from 500K to 100M to prevent audio overflow under load
+                cmd += [
+                    '-thread_queue_size', '1024',
+                    '-rtbufsize', '100M',   # Fix 8E: Large buffer for streaming stability (was 500K)
+                    '-f', 'dshow',
+                    '-i', f'audio={audio_device}',
+                ]
                 have_audio = True
             else:
                 # On Linux, user can specify ALSA/Pulse inputs; allow raw string pass-through
@@ -325,6 +570,14 @@ class StreamController(QObject):
                 # Provide a silent stereo 48kHz audio source to satisfy ingest requirements
                 cmd += ['-f', 'lavfi', '-i', 'anullsrc=cl=stereo:r=48000']
                 have_audio = True
+        # Log audio/video connection status and sync delays for terminal visibility
+        if self._log_cb:
+            audio_src = "BGM" if use_bgm else ("media file" if program_media_audio_path else ("microphone" if (capture_audio and audio_device) else "silent (anullsrc)"))
+            self._log_cb(f"[STREAM] Video: {self._size.width()}x{self._size.height()} @ {self._fps}fps, encoder: {encoder}\n")
+            self._log_cb(f"[STREAM] Audio: {audio_src}\n")
+            self._log_cb(f"[STREAM] A/V sync: video_delay_ms={video_delay_ms}, audio_delay_ms={audio_delay_ms}\n")
+            if capture_audio and audio_device:
+                self._log_cb(f"[STREAM] Audio device: {audio_device}\n")
         # Encoding and output
         # Map streams: 0 = video from pipe, 1 = audio if present
         # Use 2-second keyframe interval as recommended by YouTube: g = 2 * fps
@@ -337,25 +590,26 @@ class StreamController(QObject):
                              '-g', gop, '-keyint_min', gop, '-sc_threshold', '0',
                              '-pix_fmt', pix_fmt]
         if encoder == 'libx264':
-            # x264 tuned for low-latency live
+            # x264 tuned for low-latency live; -bf 0 -rc-lookahead 0 = no buffer delay (A/V sync)
             common_video_opts += ['-preset', preset, '-tune', 'zerolatency', '-profile:v', 'high', '-level', '4.2']
             common_video_opts += ['-g', gop, '-keyint_min', gop, '-sc_threshold', '0']
+            common_video_opts += ['-bf', '0', '-rc-lookahead', '0']
             common_video_opts += ['-b:v', bv, '-maxrate', bv, '-bufsize', f"{2*max(500,self._bitrate_kbps)}k"]
         elif encoder == 'h264_nvenc':
-            # NVENC low-latency CBR
-            common_video_opts += ['-preset', preset, '-tune', 'll', '-rc', 'cbr', '-profile:v', 'high', '-rc-lookahead', '0', '-bf', '2']
+            # NVENC: GPU-accelerated H.264 with low-latency real-time preset
+            common_video_opts += ['-preset', 'p4', '-tune', 'll', '-rc', 'cbr', '-profile:v', 'high', '-rc-lookahead', '0', '-bf', '0']
             common_video_opts += ['-b:v', bv, '-maxrate', bv, '-bufsize', f"{2*max(500,self._bitrate_kbps)}k"]
         elif encoder == 'h264_videotoolbox':
             # VideoToolbox real-time CBR
             common_video_opts += ['-profile:v', 'high', '-realtime', '1']
             common_video_opts += ['-b:v', bv, '-maxrate', bv, '-bufsize', f"{2*max(500,self._bitrate_kbps)}k"]
         elif encoder == 'h264_qsv':
-            # Intel QuickSync low-latency
-            common_video_opts += ['-profile:v', 'high', '-look_ahead', '0', '-bf', '2']
+            # Intel QuickSync: GPU-accelerated H.264 with low-latency preset
+            common_video_opts += ['-preset', 'medium', '-profile:v', 'high', '-look_ahead', '0', '-bf', '0']
             common_video_opts += ['-b:v', bv, '-maxrate', bv, '-bufsize', f"{2*max(500,self._bitrate_kbps)}k"]
         elif encoder == 'h264_amf':
-            # AMD AMF low-latency CBR
-            common_video_opts += ['-profile:v', 'high', '-rc', 'cbr', '-usage', 'lowlatency']
+            # AMD AMF: GPU-accelerated H.264 with low-latency quality
+            common_video_opts += ['-quality', 'speed', '-rc', 'cbr', '-profile:v', 'high']
             common_video_opts += ['-b:v', bv, '-maxrate', bv, '-bufsize', f"{2*max(500,self._bitrate_kbps)}k"]
         else:
             # Generic fallback H.264-compatible options
@@ -374,7 +628,7 @@ class StreamController(QObject):
                 if bgm_loop:
                     cmd += ['-stream_loop', '-1']
                 # Read input at native rate to ensure real-time playback
-                cmd += ['-re', '-i', bgm_playlist[0]]
+                cmd += ['-re', '-thread_queue_size', '1024', '-i', bgm_playlist[0]]
                 bgm_input_added = True
             elif len(bgm_playlist) > 1:
                 # Create a temporary concat list file
@@ -382,9 +636,10 @@ class StreamController(QObject):
                     list_fd, list_path = tempfile.mkstemp(prefix='bgm_', suffix='.txt')
                     with os.fdopen(list_fd, 'w', encoding='utf-8') as f:
                         for p in bgm_playlist:
-                            f.write(f"file '{p.replace("'", "'\\''")}'\n")
+                            escaped_p = p.replace("\\", "\\\\").replace("'", "\\'")
+                            f.write(f"file '{escaped_p}'\n")
                     # Note: -stream_loop typically not supported with concat demuxer; ignoring loop for multi-file
-                    cmd += ['-re', '-f', 'concat', '-safe', '0', '-i', list_path]
+                    cmd += ['-re', '-thread_queue_size', '1024', '-f', 'concat', '-safe', '0', '-i', list_path]
                     bgm_input_added = True
                     # Keep path to remove later if needed
                     self._bgm_concat_list_path = list_path
@@ -409,7 +664,7 @@ class StreamController(QObject):
                 + ['-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2']
                 + audio_sync_opts
                 + flv_opts
-                + ['-vsync', '1', '-f', 'flv']
+                + ['-vsync', 'vfr', '-async', '1', '-f', 'flv']
                 + rtmp_opts
                 + [url]
             )
@@ -428,7 +683,7 @@ class StreamController(QObject):
                 + ['-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2']
                 + audio_sync_opts
                 + flv_opts
-                + ['-vsync', '1', '-f', 'flv']
+                + ['-vsync', 'vfr', '-async', '1', '-f', 'flv']
                 + rtmp_opts
                 + [url]
             )
@@ -447,13 +702,13 @@ class StreamController(QObject):
                     + ['-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2']
                     + audio_sync_opts
                     + flv_opts
-                    + ['-vsync', '1', '-f', 'flv']
+                    + ['-vsync', 'vfr', '-async', '1', '-f', 'flv']  # Fix 8C: vfr instead of cfr, async for A/V sync
                     + rtmp_opts
                     + [url]
                 )
             else:
                 # Video-only; still allow video delay if requested
-                cmd += ['-map', '0:v:0'] + vfilter_opts + common_video_opts + flv_opts + ['-vsync', '1', '-f', 'flv'] + rtmp_opts + [url]
+                cmd += ['-map', '0:v:0'] + vfilter_opts + common_video_opts + flv_opts + ['-vsync', 'vfr', '-async', '1', '-f', 'flv'] + rtmp_opts + [url]
 
         try:
             # Debug: log the exact FFmpeg command
@@ -507,7 +762,28 @@ class StreamController(QObject):
                     if 'ffmpeg/ffmpeg' in (ffmpeg_path or '') and self._log_cb:
                         self._log_cb("Hint: On macOS, a quarantined bundled FFmpeg may fail to run. You can remove quarantine with: xattr -d com.apple.quarantine '<path-to-ffmpeg>'\n")
                     raise RuntimeError(f"FFmpeg binary not executable or not working: {ffmpeg_path}")
-            proc.start(ffmpeg_path, cmd)
+            try:
+                # === DIAGNOSTIC: FFmpeg startup ===
+                print(f"\n[STREAM] ╭──────────────────────────────────────────")
+                print(f"[STREAM] 🔴 FFmpeg process starting")
+                print(f"[STREAM]    FFmpeg path: {ffmpeg_path}")
+                print(f"[STREAM]    File: streaming.py")
+                print(f"[STREAM]    Time: {_time.strftime('%H:%M:%S')}")
+                print(f"[STREAM] ╪─────────────────────────────────────────\n")
+                proc.start(ffmpeg_path, cmd)
+            except FileNotFoundError as e:
+                _diag_error("FFmpeg executable not found — check FFmpeg installation",
+                            e,
+                            f"File: streaming.py | "
+                            f"Expected path: {ffmpeg_path}")
+                raise
+            except Exception as e:
+                _diag_error("Failed to start FFmpeg process",
+                            e, 
+                            f"File: streaming.py | Command args: {cmd[:4]}")
+                raise
+            
+            # === DIAGNOSTIC: Verify process started ===
             if not proc.waitForStarted(8000):
                 raise RuntimeError('Failed to start FFmpeg process (timeout).')
             self._proc = proc
@@ -518,9 +794,19 @@ class StreamController(QObject):
 
         self._running = True
 
+        # Fix 8B: Start the rate-limited frame queue
+        self._frame_queue = StreamFrameQueue(target_fps=self._fps, max_queue_size=3)
+        self._frame_queue.start(self._proc, target_fps=self._fps, log_cb=self._log_cb)
+
         # Start frame timer - use precise timing for streaming
         interval = max(4, int(1000 / max(1, self._fps)))  # Allow >60fps
         self._timer.start(interval)
+        
+        # === DIAGNOSTIC: Confirm startup success ===
+        print(f"[STREAM] ✅ FFmpeg started successfully (PID: {self._proc.processId()})")
+        print(f"[STREAM]    Target FPS: {self._fps}")
+        print(f"[STREAM]    Resolution: {self._size.width()}x{self._size.height()}")
+        print(f"[STREAM]    File: streaming.py\n")
         
         # Log startup success
         if self._log_cb:
@@ -528,6 +814,15 @@ class StreamController(QObject):
         self.statusChanged.emit("Started")
 
     def stop(self):
+        # === DIAGNOSTIC: Stream stop ===
+        print(f"\n[STREAM] 🛑 Stopping stream controller")
+        print(f"[STREAM]    File: streaming.py")
+        try:
+            import time as _stop_time
+            print(f"[STREAM]    Time: {_stop_time.strftime('%H:%M:%S')}")
+        except Exception:
+            pass
+        print(f"[STREAM]\n")
         if not self.is_running():
             return
         try:
@@ -539,6 +834,10 @@ class StreamController(QObject):
                 except Exception:
                     pass
                 self._av_backend = None
+            # Stop frame queue (Fix 8B)
+            if self._frame_queue:
+                self._frame_queue.stop()
+                self._frame_queue = None
             # Stop pipe-based process
             self._timer.stop()
             if self._proc:
@@ -574,7 +873,7 @@ class StreamController(QObject):
                 pass
 
     def _send_frame(self):
-        """Send a frame to FFmpeg stdin"""
+        """Send a frame to FFmpeg stdin using the rate-limited queue (Fix 8B)"""
         if not self.is_running() or not self._frame_provider:
             return
         
@@ -602,28 +901,35 @@ class StreamController(QObject):
             if img.format() != QImage.Format.Format_RGBA8888:
                 img = img.convertToFormat(QImage.Format.Format_RGBA8888)
             
-            # Write frame data to FFmpeg stdin
-            if self._proc and self._proc.state() == QProcess.ProcessState.Running:
-                # Backpressure guard: if write buffer is large, drop this frame to avoid stalls
+            # Fix 8A: Convert RGBA to BGR24 (3 bytes/pixel instead of 4)
+            # Get raw RGBA bytes first
+            frame_len = self._size.width() * self._size.height() * 4  # RGBA
+            rgba_data = img.bits().asstring(frame_len)
+            
+            # Convert RGBA to BGR24 using numpy (100x faster than Python loop)
+            try:
+                import numpy as np
+                
+                # Convert RGBA bytes to numpy array and reshape to pixels
+                arr = np.frombuffer(rgba_data, dtype=np.uint8).reshape(-1, 4)
+                bgr24 = arr[:, [2, 1, 0]]  # Take B, G, R channels (drop A)
+                frame_bytes = bgr24.tobytes()
+            except Exception:
+                # Fallback: use RGBA directly if conversion fails
+                if self._log_cb:
+                    self._log_cb("Warning: RGBA->BGR24 conversion failed, using RGBA\n")
+                frame_bytes = rgba_data
+            
+            # Fix 8B: Use non-blocking queue instead of direct pipe write
+            if self._frame_queue:
+                self._frame_queue.put_frame(frame_bytes)
+            elif self._proc and self._proc.state() == QProcess.ProcessState.Running:
+                # Fallback: if queue not available, write directly (for compatibility)
                 try:
-                    pending = int(self._proc.bytesToWrite())
-                except Exception:
-                    pending = 0
-                # Allow up to ~2 frames pending before dropping
-                max_pending = (self._frame_bytes or (self._size.width() * self._size.height() * 4)) * 2
-                if pending > max_pending:
-                    if self._log_cb:
-                        self._log_cb(f"Dropping frame due to backpressure (pending={pending})\n")
-                    return
-                frame_len = self._frame_bytes or (self._size.width() * self._size.height() * 4)
-                frame_data = img.bits().asstring(frame_len)
-                try:
-                    self._proc.write(frame_data)
-                    # Flush is implicit/asynchronous in QProcess; ensure channel open
+                    self._proc.write(frame_bytes)
                 except Exception as e:
                     if self._log_cb:
                         self._log_cb(f"FFmpeg write error: {e}\n")
-                    # Trigger reconnect
                     self._handle_broken_pipe()
 
         except BrokenPipeError:
@@ -661,20 +967,48 @@ class StreamController(QObject):
             for line in data.splitlines():
                 if line and self._log_cb:
                     self._log_cb(f"FFmpeg: {line}\n")
-                # Runtime fallback: unknown encoder -> force libx264 and restart immediately
+                # Log when audio+video are connected to output
                 low = (line or '').lower()
-                if 'unknown encoder' in low or ('error selecting an encoder' in low):
-                    # Only fallback if we weren't already on libx264
+                if 'stream #0:0' in low and '-> #0:0' in low:
+                    if self._log_cb:
+                        self._log_cb("[STREAM] Video connected to output\n")
+                if ('-> #0:1' in low or 'stream #1:0 -> #0:1' in low) and ('audio' in low or 'aac' in low or 'pcm' in low):
+                    if self._log_cb:
+                        self._log_cb("[STREAM] Audio connected to output\n")
+                # Parse progress "time=HH:MM:SS.ms" for A/V sync debug (throttle to ~every 5s)
+                if 'time=' in line and 'bitrate=' in line and self._log_cb:
+                    import re as _re
+                    m = _re.search(r'time=(\d{2}):(\d{2}):(\d{2}\.\d+)', line)
+                    if m:
+                        try:
+                            h, mi, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
+                            out_sec = h * 3600 + mi * 60 + s
+                            now = _time.time()
+                            if now - getattr(self, '_last_av_log_time', 0) >= 5.0:
+                                self._last_av_log_time = now
+                                self._log_cb(f"[STREAM] A/V output_time={out_sec:.1f}s (video+audio muxed)\n")
+                        except Exception:
+                            pass
+                # Runtime fallback: NVENC/CUDA unavailable or unknown encoder -> force libx264
+                low = (line or '').lower()
+                nvenc_fail = 'cannot load nvcuda' in low or 'nvcuda.dll' in low
+                encoder_fail = 'unknown encoder' in low or 'error selecting an encoder' in low
+                if nvenc_fail or encoder_fail:
                     if self._forced_encoder != 'libx264':
                         self._forced_encoder = 'libx264'
                         if self._log_cb:
-                            self._log_cb("Falling back to libx264 encoder and restarting...\n")
+                            self._log_cb("NVENC/CUDA unavailable - falling back to libx264 (software) encoder...\n")
                         self._immediate_restart()
                         return
         except Exception:
             pass
 
     def _on_ffmpeg_error(self, err):
+        # === DIAGNOSTIC: Error occurred ===
+        _diag_error(f"FFmpeg process error occurred",
+                    err,
+                    f"File: streaming.py → _on_ffmpeg_error | "
+                    f"Error code: {err}")
         if self._log_cb:
             self._log_cb(f"FFmpeg process error: {err}\n")
         # Guard against emitting after deletion during teardown
@@ -685,6 +1019,12 @@ class StreamController(QObject):
         self._schedule_reconnect()
 
     def _on_ffmpeg_finished(self, code: int, status):
+        # === DIAGNOSTIC: Process finished ===
+        print(f"\n[STREAM] ⬛ FFmpeg exited")
+        print(f"[STREAM]    Exit code: {code}")
+        print(f"[STREAM]    Status: {status}")
+        print(f"[STREAM]    File: streaming.py")
+        print(f"[STREAM]    Time: {_time.strftime('%H:%M:%S')}\n")
         if self._log_cb:
             self._log_cb(f"FFmpeg exited with code {code}, status {status}\n")
         if self._running and not self._stopping:
@@ -788,8 +1128,11 @@ class StreamController(QObject):
                 self._av_backend.source_switched(int(max(0, delay_ms)))
                 if self._log_cb:
                     self._log_cb(f"Applied source switch with audio delay {int(max(0, delay_ms))} ms (PyAV)\n")
-        except Exception:
-            pass
+        except Exception as e:
+            # Log error for debugging
+            error_handler = get_error_handler()
+            if error_handler:
+                error_handler.log_error(f"Error in source switch: {e}", ErrorSeverity.WARNING)
 
     # --- Public API for A/V resync when media scrubs while live ---
     def resync_to_media(self, media_path: str, start_ms: int):
@@ -849,6 +1192,8 @@ class StreamController(QObject):
             import sys as _sys
             if _sys.platform == 'darwin' and 'h264_videotoolbox' in encs:
                 return 'h264_videotoolbox'
+            if _sys.platform.startswith('win') and 'h264_qsv' in encs:
+                return 'h264_qsv'
             if 'h264_nvenc' in encs:
                 return 'h264_nvenc'
             if _sys.platform.startswith('win') and 'h264_amf' in encs:
@@ -859,21 +1204,81 @@ class StreamController(QObject):
             pass
         return 'libx264'
 
+    def _get_best_video_encoder(self) -> str:
+        """Intelligently select GPU video encoder with automatic fallback.
+        Tests for NVIDIA NVENC → Intel QuickSync → AMD AMF → libx264."""
+        try:
+            encs = self._detect_available_encoders()
+            
+            # Prioritize by platform and GPU availability
+            import sys as _sys
+            
+            # Test encoders in priority order
+            gpu_encoders = [
+                ('h264_nvenc', 'NVIDIA NVENC'),
+                ('h264_qsv', 'Intel QuickSync'),
+                ('h264_amf', 'AMD AMF'),
+            ]
+            
+            # Platform-specific adjustments
+            if _sys.platform == 'darwin':
+                # macOS: VideoToolbox is preferred
+                if 'h264_videotoolbox' in encs:
+                    if self._log_cb:
+                        self._log_cb("[ENCODE] ✅ Using Apple VideoToolbox (GPU encoding)\n")
+                    return 'h264_videotoolbox'
+            elif _sys.platform.startswith('win'):
+                # Windows: Try GPU encoders, prioritize QSV for Intel systems
+                if 'h264_qsv' in encs:
+                    if self._log_cb:
+                        self._log_cb("[ENCODE] ✅ Using Intel QuickSync (GPU encoding)\n")
+                    return 'h264_qsv'
+            
+            # Try remaining GPU encoders
+            for encoder_name, encoder_label in gpu_encoders:
+                if encoder_name in encs:
+                    if self._log_cb:
+                        self._log_cb(f"[ENCODE] ✅ Using {encoder_label} (GPU encoding)\n")
+                    return encoder_name
+            
+            # No GPU encoder found; fallback to software
+            if self._log_cb:
+                self._log_cb("[ENCODE] ⚠ Using libx264 (CPU encoding) — no GPU encoder found\n")
+            return 'libx264'
+            
+        except Exception as e:
+            error_handler = get_error_handler()
+            if error_handler:
+                error_handler.log_error(f"Error selecting encoder: {e}", ErrorSeverity.WARNING)
+            if self._log_cb:
+                self._log_cb(f"[ENCODE] ⚠ Using libx264 (CPU encoding) — selection error: {e}\n")
+            return 'libx264'
+
     def _select_best_h264_encoder(self) -> str:
         """Prefer hardware H.264 encoders per platform; fallback to libx264."""
         try:
+            # Use centralized encoder selector if available
+            if get_encoder_selector:
+                selector = get_encoder_selector(get_ffmpeg_path())
+                return selector.select_best_h264_encoder()
+            
+            # Fallback to old logic (Windows: QSV before NVENC for Intel Iris Xe laptops)
             encs = self._detect_available_encoders()
             import sys as _sys
             if _sys.platform == 'darwin' and 'h264_videotoolbox' in encs:
                 return 'h264_videotoolbox'
+            if _sys.platform.startswith('win') and 'h264_qsv' in encs:
+                return 'h264_qsv'
             if 'h264_nvenc' in encs:
                 return 'h264_nvenc'
             if _sys.platform.startswith('win') and 'h264_amf' in encs:
                 return 'h264_amf'
             if 'h264_qsv' in encs:
                 return 'h264_qsv'
-        except Exception:
-            pass
+        except Exception as e:
+            error_handler = get_error_handler()
+            if error_handler:
+                error_handler.log_error(f"Error selecting encoder: {e}", ErrorSeverity.WARNING)
         return 'libx264'
 
     def _recommended_bitrate_kbps(self, w: int, h: int, fps: int) -> int:
@@ -1028,8 +1433,19 @@ class StreamController(QObject):
                     continue
                 if in_audio and 'DirectShow video devices' in l:
                     break
+
+                # Header-based parsing: lines like: "Stereo Mix (Realtek(R) Audio)"
                 if in_audio and '"' in l:
-                    # Lines like: "Stereo Mix (Realtek(R) Audio)"
+                    try:
+                        name = l.split('"')[1]
+                        if name:
+                            names.append(name)
+                    except Exception:
+                        pass
+
+                # Fallback parsing for some FFmpeg builds/log formats (no section headers), e.g.:
+                # [in#0 @ ...] "Microphone Array (...)" (audio)
+                if (not in_audio) and '(audio)' in l and '"' in l:
                     try:
                         name = l.split('"')[1]
                         if name:

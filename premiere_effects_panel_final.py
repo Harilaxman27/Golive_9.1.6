@@ -192,18 +192,19 @@ class EffectButton(QPushButton):
         # No need for custom click tracking - using Qt's built-in double-click
         
         # Clean styling
+        # Clean styling
         self.setStyleSheet("""
             QPushButton {
-                background: #2b2b2b;
-                border: 1px solid #3a3a3a;
-                border-radius: 3px;
+                background: #2A2A2A;
+                border: 1px solid #383838;
+                border-radius: 6px;
             }
             QPushButton:hover {
-                background: #353535;
-                border: 1px solid #4a4a4a;
+                background: #333;
+                border: 1px solid #555;
             }
             QPushButton:pressed {
-                border: 2px solid #00aaff;
+                border: 2px solid #007AFF;
             }
         """)
         
@@ -279,7 +280,7 @@ class AdaptiveEffectsGrid(QWidget):
         self.max_columns = 3  # Fixed 3 columns for better visibility
         
         # Performance optimizations
-        self.setStyleSheet("background: #1e1e1e;")
+        self.setStyleSheet("background: #1C1C1C;")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
     
     def resizeEvent(self, event):
@@ -314,16 +315,21 @@ class AdaptiveEffectsGrid(QWidget):
         except Exception:
             pass
         
-        # Fixed 3 columns for better visibility
-        columns = 3
+        # Dynamic columns: 3 if sidebar hidden (wide), 2 if sidebar visible (narrow)
+        # Threshold around 400px width
+        if available_width > 380:
+            columns = 3
+        else:
+            columns = 2
         
-        # Calculate button size to fit width perfectly with 3 columns
-        button_width = (available_width - (columns - 1) * 8) // columns
+        # Calculate button size to fit width perfectly
+        # Account for scrollbar width (approx 10-15px) and margins
+        button_width = (available_width - (columns - 1) * 8 - 10) // columns
         button_height = int(button_width * 0.56)  # 16:9 aspect ratio
         
         # Ensure minimum size for visibility
-        button_width = max(button_width, 150)
-        button_height = max(button_height, 85)
+        button_width = max(button_width, 100)
+        button_height = max(button_height, 56)
         
         return columns, QSize(button_width, button_height)
     
@@ -513,6 +519,22 @@ class FinalEffectsPanel(QWidget):
         # Defer category loading for faster startup
         QTimer.singleShot(50, self._load_categories)  # Faster initial load
     
+    def _toggle_sidebar(self):
+        """Toggle the visibility of the category tree sidebar."""
+        if self.category_tree.isVisible():
+            self.category_tree.hide()
+            # Collapse splitter handle 0
+            self.splitter.setSizes([0, self.width()])
+        else:
+            self.category_tree.show()
+            # Restore reasonable size
+            total = max(1, self.width())
+            left = max(150, int(total * 0.25))
+            self.splitter.setSizes([left, total - left])
+            
+        # Trigger grid rebuild to adapt to new width
+        self.effects_grid.schedule_rebuild(50)
+
     def _setup_ui(self):
         """Create UI"""
         layout = QVBoxLayout(self)
@@ -521,25 +543,47 @@ class FinalEffectsPanel(QWidget):
         
         # Search bar
         search_widget = QWidget()
-        search_widget.setFixedHeight(36)
-        search_widget.setStyleSheet("background: #2b2b2b;")
+        search_widget.setFixedHeight(40)
+        search_widget.setStyleSheet("background: #252525; border-bottom: 1px solid #333;")
         
         search_layout = QHBoxLayout(search_widget)
         search_layout.setContentsMargins(8, 6, 8, 6)
+        search_layout.setSpacing(8)
+        
+        # Hamburger Menu Button
+        self.menu_btn = QPushButton("☰")
+        self.menu_btn.setFixedSize(28, 28)
+        self.menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.menu_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                color: #888;
+                font-size: 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                color: #E0E0E0;
+                background: #333;
+                border-radius: 4px;
+            }
+        """)
+        self.menu_btn.clicked.connect(self._toggle_sidebar)
+        search_layout.addWidget(self.menu_btn)
         
         self.search_bar = QLineEdit()
         self.search_bar.setPlaceholderText("Search effects...")
         self.search_bar.setStyleSheet("""
             QLineEdit {
-                background: #1e1e1e;
-                border: 1px solid #3a3a3a;
+                background: #1C1C1C;
+                border: 1px solid #333;
                 border-radius: 4px;
                 padding: 5px 10px;
-                color: white;
+                color: #E0E0E0;
                 font-size: 12px;
             }
             QLineEdit:focus {
-                border: 1px solid #00aaff;
+                border: 1px solid #007AFF;
             }
         """)
         search_layout.addWidget(self.search_bar)
@@ -584,21 +628,24 @@ class FinalEffectsPanel(QWidget):
             pass
         self.category_tree.setStyleSheet("""
             QTreeWidget {
-                background: #2b2b2b;
+                background: #252525;
                 border: none;
-                color: white;
+                color: #E0E0E0;
                 font-size: 12px;
                 outline: none;
             }
             QTreeWidget::item {
                 padding: 6px;
-                min-height: 24px;
+                min-height: 28px;
+                border-radius: 4px;
+                margin: 1px 4px;
             }
             QTreeWidget::item:selected {
-                background: #00aaff;
+                background: #007AFF;
+                color: white;
             }
             QTreeWidget::item:hover {
-                background: #3a3a3a;
+                background: #333;
             }
             /* Explicit branch indicators for dark theme */
             QTreeView::branch:has-children:closed,
@@ -621,21 +668,22 @@ class FinalEffectsPanel(QWidget):
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll_area.setStyleSheet("""
             QScrollArea {
-                background: #1e1e1e;
+                background: #1C1C1C;
                 border: none;
             }
             QScrollBar:vertical {
-                background: #2b2b2b;
+                background: #1C1C1C;
                 width: 10px;
-                border-radius: 5px;
+                margin: 0;
             }
             QScrollBar::handle:vertical {
-                background: #555;
+                background: #444;
                 border-radius: 5px;
                 min-height: 30px;
+                margin: 2px;
             }
             QScrollBar::handle:vertical:hover {
-                background: #666;
+                background: #555;
             }
             QScrollBar::add-line:vertical,
             QScrollBar::sub-line:vertical {

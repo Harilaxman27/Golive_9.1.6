@@ -32,3 +32,6 @@ dist/
 
 # Others
 .envrc
+
+
+venv_py312/

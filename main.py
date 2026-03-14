@@ -8,45 +8,200 @@ A cross-platform PyQt6 application for live streaming and recording
 import sys
 import os
 import time
+import json
+import traceback
+import threading
+import platform
 
-# Auto-restart with Python 3.12 if running with Python 3.13
-if sys.version_info.major == 3 and sys.version_info.minor == 13:
-    import subprocess
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    venv_python = os.path.join(script_dir, "venv_py312", "bin", "python")
-    if os.path.exists(venv_python):
-        print("Detected Python 3.13. Restarting with Python 3.12...")
-        subprocess.run([venv_python] + sys.argv)
-        sys.exit(0)
-from PyQt6.QtWidgets import QApplication, QMainWindow, QFrame, QWidget, QSplitter, QMessageBox
-from PyQt6.QtCore import Qt, QSize, qInstallMessageHandler, QtMsgType, QUrl, QTimer, QObject, QEvent
-from PyQt6.QtGui import QIcon, QPixmap, QImage, QFont
-from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QAudioSource, QAudioSink, QMediaDevices, QVideoSink, QCamera, QMediaCaptureSession, QAudioFormat
-# Defer PyAV import to runtime; some systems may not have FFmpeg headers/libs available.
-_HAS_AVF_PYAV = False
-from PyQt6 import uic
-from transitions import TransitionManager, TRANSITIONS_CATALOG
-from overlay_manager import EffectManager
-from premiere_effects_panel_final import FinalEffectsPanel as PremiereEffectsPanel
+from PyQt6.QtWidgets import QVBoxLayout
 
-# Import FPS controller for global timing control
+# Ensure stdout/stderr can encode Unicode on Windows consoles
 try:
-    from fps_controller import get_fps_controller, set_global_fps, get_global_fps
-    from enhanced_streaming import get_streaming_manager
-    FPS_CONTROLLER_AVAILABLE = True
-except ImportError:
-    FPS_CONTROLLER_AVAILABLE = False
-    print("FPS Controller not available, using legacy timing")
-from fps_stabilizer import fps_manager
-from unified_timer import timer_manager
-from event_coalescer import event_coalescer, ui_coalescer
-from gl_context_manager import gl_context_manager
-from texture_pool import texture_pool
-from smart_cache import smart_cache
-from thread_pool_manager import thread_pool, TaskPriority
-from adaptive_quality import quality_manager
-from memory_pool import general_memory_pool, image_memory_pool
-from performance_monitor import performance_monitor
+    if sys.platform.startswith('win'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:
+            pass
+        try:
+            sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:
+            pass
+except Exception:
+    pass
+
+print("\n[IMPORT] Starting GoLive Studio imports...", flush=True, file=sys.stderr)
+sys.stderr.flush()
+
+try:
+    # Auto-restart with Python 3.12 if running with Python 3.13
+    if sys.version_info.major == 3 and sys.version_info.minor == 13:
+        import subprocess
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        # Prefer platform-appropriate venv layout. On Windows look for Scripts\python.exe,
+        # on Unix-like systems look for bin/python. Also allow either form if present.
+        candidates = [
+            os.path.join(script_dir, "venv_py312", "Scripts", "python.exe"),
+            os.path.join(script_dir, "venv_py312", "Scripts", "python"),
+            os.path.join(script_dir, "venv_py312", "bin", "python"),
+        ]
+        venv_python = None
+        for c in candidates:
+            if os.path.exists(c):
+                venv_python = c
+                break
+        if venv_python:
+            print("Detected Python 3.13. Restarting with Python 3.12...")
+            try:
+                subprocess.run([venv_python] + sys.argv)
+            except OSError as e:
+                print(f"Failed to execute restart interpreter {venv_python}: {e}")
+            sys.exit(0)
+    
+    print("[IMPORT] Loading PyQt6...", flush=True, file=sys.stderr)
+    sys.stderr.flush()
+    from PyQt6.QtWidgets import QApplication, QMainWindow, QFrame, QWidget, QSplitter, QMessageBox, QHBoxLayout, QVBoxLayout, QLabel, QGridLayout, QPushButton, QSizePolicy, QSpacerItem, QSlider, QGraphicsDropShadowEffect, QStackedWidget, QButtonGroup, QScrollArea, QTextEdit
+    from PyQt6.QtCore import Qt, QSize, qInstallMessageHandler, QtMsgType, QUrl, QTimer, QObject, QEvent
+    from PyQt6.QtGui import QIcon, QPixmap, QImage, QFont, QPalette, QColor
+    from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QAudioSource, QAudioSink, QMediaDevices, QVideoSink, QCamera, QMediaCaptureSession, QAudioFormat
+    # Defer PyAV import to runtime; some systems may not have FFmpeg headers/libs available.
+    _HAS_AVF_PYAV = False
+    # Thread pool for offloading blocking work
+    try:
+        from thread_pool_manager import thread_pool, TaskPriority
+    except Exception:
+        thread_pool = None
+        TaskPriority = None
+    
+    print("[IMPORT] Loading project modules...", flush=True, file=sys.stderr)
+    sys.stderr.flush()
+    from PyQt6 import uic
+    from transitions import TransitionManager, TRANSITIONS_CATALOG
+    from overlay_manager import EffectManager
+    from premiere_effects_panel_final import FinalEffectsPanel as PremiereEffectsPanel
+
+    try:
+        from project_manager import ProjectManager
+    except Exception:
+        ProjectManager = None
+    
+    # macOS Native Features (AVFoundation Camera, VideoToolbox Encoder)
+    try:
+        from macos_native_helper import get_macos_helper, MacOSNativeHelper
+        MACOS_NATIVE_AVAILABLE = True
+    except Exception as e:
+        MACOS_NATIVE_AVAILABLE = False
+        print(f"[IMPORT] macOS native features not available: {e}")
+    
+    print("[IMPORT] All critical imports successful!", flush=True, file=sys.stderr)
+    sys.stderr.flush()
+
+except Exception as e:
+    print(f"\n[IMPORT ERROR] Failed during initialization: {e}", flush=True, file=sys.stderr)
+    print(traceback.format_exc(), flush=True, file=sys.stderr)
+    sys.stderr.flush()
+    sys.exit(1)
+
+print("[IMPORT] Loading performance and utility modules...", flush=True, file=sys.stderr)
+sys.stderr.flush()
+
+# DISABLED: Try-except that was exiting on error
+# Now we'll try to import but continue even if modules fail
+try:
+    # Import FPS controller for global timing control
+    try:
+        from fps_controller import get_fps_controller, set_global_fps, get_global_fps
+        from enhanced_streaming import get_streaming_manager
+        FPS_CONTROLLER_AVAILABLE = True
+    except ImportError:
+        FPS_CONTROLLER_AVAILABLE = False
+        print("FPS Controller not available, using legacy timing")
+    
+    print("[IMPORT-SUB-1] Importing fps_stabilizer...", flush=True, file=sys.stderr)
+    sys.stderr.flush()
+    from fps_stabilizer import fps_manager
+    
+    print("[IMPORT-SUB-2] Importing unified_timer...", flush=True, file=sys.stderr)
+    sys.stderr.flush()
+    from unified_timer import timer_manager
+    
+    print("[IMPORT-SUB-3] Importing event_coalescer...", flush=True, file=sys.stderr)
+    sys.stderr.flush()
+    try:
+        from event_coalescer import event_coalescer, ui_coalescer
+    except Exception as e:
+        print(f"[IMPORT-SKIP] event_coalescer failed: {e}", flush=True, file=sys.stderr)
+        event_coalescer = None
+        ui_coalescer = None
+    
+    print("[IMPORT-SUB-4] Skipping gl_context_manager (compatibility mode)...", flush=True, file=sys.stderr)
+    sys.stderr.flush()
+    # DISABLED: gl_context_manager causes app to crash
+    # from gl_context_manager import gl_context_manager
+    gl_context_manager = None
+
+    print("[IMPORT-SUB-5] Importing texture_pool...", flush=True, file=sys.stderr)
+    sys.stderr.flush()
+    try:
+        from texture_pool import texture_pool
+    except Exception as e:
+        print(f"[IMPORT-SKIP] texture_pool failed: {e}", flush=True, file=sys.stderr)
+        texture_pool = None
+    
+    print("[IMPORT-SUB-6] Importing smart_cache...", flush=True, file=sys.stderr)
+    sys.stderr.flush()
+    try:
+        from smart_cache import smart_cache
+    except Exception as e:
+        print(f"[IMPORT-SKIP] smart_cache failed: {e}", flush=True, file=sys.stderr)
+        smart_cache = None
+    
+    print("[IMPORT-SUB-7] Importing thread_pool_manager...", flush=True, file=sys.stderr)
+    sys.stderr.flush()
+    try:
+        from thread_pool_manager import thread_pool, TaskPriority
+    except Exception as e:
+        print(f"[IMPORT-SKIP] thread_pool_manager failed: {e}", flush=True, file=sys.stderr)
+        thread_pool = None
+        TaskPriority = None
+    
+    print("[IMPORT-SUB-8] Importing adaptive_quality...", flush=True, file=sys.stderr)
+    sys.stderr.flush()
+    try:
+        from adaptive_quality import quality_manager
+    except Exception as e:
+        print(f"[IMPORT-SKIP] adaptive_quality failed: {e}", flush=True, file=sys.stderr)
+        quality_manager = None
+    
+    print("[IMPORT-SUB-9] Importing memory_pool...", flush=True, file=sys.stderr)
+    sys.stderr.flush()
+    try:
+        from memory_pool import general_memory_pool, image_memory_pool
+    except Exception as e:
+        print(f"[IMPORT-SKIP] memory_pool failed: {e}", flush=True, file=sys.stderr)
+        general_memory_pool = None
+        image_memory_pool = None
+    
+    print("[IMPORT-SUB-10] Importing performance_monitor...", flush=True, file=sys.stderr)
+    sys.stderr.flush()
+    try:
+        from performance_monitor import performance_monitor
+    except Exception as e:
+        print(f"[IMPORT-SKIP] performance_monitor failed: {e}", flush=True, file=sys.stderr)
+        performance_monitor = None
+    
+    print("[IMPORT] All utility modules loaded!", flush=True, file=sys.stderr)
+    sys.stderr.flush()
+    
+except Exception as e:
+    print(f"\n[IMPORT WARNING] Failed loading some utility modules (continuing anyway): {e}", flush=True, file=sys.stderr)
+    import traceback
+    print(traceback.format_exc(), file=sys.stderr)
+    sys.stderr.flush()
+    # DON'T exit - allow app to continue with reduced functionality
+
+print("[TRACE-1] About to import performance optimizers", flush=True, file=sys.stderr)
+sys.stderr.flush()
+
 # Import performance optimizer for memory and FPS optimization
 try:
     from performance_optimizer import get_performance_optimizer, optimize_performance_now
@@ -55,6 +210,9 @@ except ImportError:
     PERFORMANCE_OPTIMIZER_AVAILABLE = False
     print("Performance Optimizer not available")
 
+print("[TRACE-2] About to import aggressive memory optimizer", flush=True, file=sys.stderr)
+sys.stderr.flush()
+
 # Import aggressive memory optimizer for ultra-low memory usage
 try:
     from aggressive_memory_optimizer import force_memory_under_target, continuous_memory_management
@@ -62,10 +220,22 @@ try:
 except ImportError:
     AGGRESSIVE_MEMORY_OPTIMIZER_AVAILABLE = False
     print("Aggressive Memory Optimizer not available")
+
+print("[TRACE-3] About to import renderer", flush=True, file=sys.stderr)
+sys.stderr.flush()
+
 # Import optimized renderer with single path
 try:
     from renderer.migration_helper import create_graphics_output_widget, check_gpu_support
+    
+    print("[TRACE-3a] check_gpu_support() starting", flush=True, file=sys.stderr)
+    sys.stderr.flush()
+    
     gpu_info = check_gpu_support()
+    
+    print(f"[TRACE-3b] GPU info: {gpu_info}", flush=True, file=sys.stderr)
+    sys.stderr.flush()
+    
     _USE_NEW_RENDERER = bool(gpu_info.get('opengl_available') or gpu_info.get('d3d_available'))
     
     # OPTIMIZATION: Use single renderer path to avoid duplication
@@ -77,6 +247,10 @@ try:
         print("Using CPU renderer (fallback mode)")
         # Try to use enhanced graphics output as fallback
         from enhanced_graphics_output import EnhancedGraphicsOutputWidget as GraphicsOutputWidget
+    
+    print("[TRACE-3c] Renderer loaded successfully", flush=True, file=sys.stderr)
+    sys.stderr.flush()
+    
 except ImportError as e:
     print(f"Renderer import error, using fallback: {e}")
     # Create a fallback minimal graphics output widget
@@ -118,18 +292,78 @@ except ImportError as e:
     print(f"Enhanced mirror not available, using fallback: {e}")
     from external_display import DisplayMirrorController
     _USE_ENHANCED_MIRROR = False
+
+print("[TRACE-4] About to import recording modules", flush=True, file=sys.stderr)
+sys.stderr.flush()
+
 from recording import RecorderController
 from recording_settings_dialog import RecordingSettingsDialog
+
+print("[TRACE-4.5] About to import OBS-style camera pipeline", flush=True, file=sys.stderr)
+sys.stderr.flush()
+
+# Import OBS-style camera pipeline modules (for stable, locked FPS)
+try:
+    from obs_pipeline import FrameBuffer, CameraWorker, RenderThread
+    from camera_manager_obs import SignaledCameraManager
+    OBS_CAMERA_PIPELINE_AVAILABLE = True
+    print("OBS-style camera pipeline loaded successfully")
+except ImportError as e:
+    OBS_CAMERA_PIPELINE_AVAILABLE = False
+    print(f"OBS-style camera pipeline not available, will use fallback: {e}")
+
+print("[TRACE-5] About to import FFmpeg utils", flush=True, file=sys.stderr)
+sys.stderr.flush()
 
 # Enhanced bundled FFmpeg support - ensures internal FFmpeg is always used
 from ffmpeg_utils import setup_ffmpeg_environment, get_ffmpeg_path
 
+print("[TRACE-6] About to import GPU acceleration", flush=True, file=sys.stderr)
+sys.stderr.flush()
+
+# Import GPU acceleration module for texture upload and YUV conversion
+try:
+    from gpu_acceleration import (
+        initialize_gpu_acceleration, 
+        shutdown_gpu_acceleration,
+        get_gpu_texture_manager,
+        get_gpu_frame_converter
+    )
+    GPU_ACCELERATION_AVAILABLE = True
+    print("GPU acceleration module loaded successfully")
+except ImportError as e:
+    GPU_ACCELERATION_AVAILABLE = False
+    print(f"GPU acceleration not available: {e}")
+
+# Import Phase 3: Full GPU Pipeline with zero-copy
+try:
+    from gpu_pipeline import (
+        initialize_gpu_pipeline,
+        shutdown_gpu_pipeline,
+        get_gpu_pipeline
+    )
+    GPU_PIPELINE_AVAILABLE = True
+    print("Phase 3 GPU Pipeline loaded successfully")
+except ImportError as e:
+    GPU_PIPELINE_AVAILABLE = False
+    print(f"Phase 3 GPU Pipeline not available: {e}")
+
+print("[TRACE-6] About to call setup_ffmpeg_environment()", flush=True, file=sys.stderr)
+sys.stderr.flush()
+
 # Initialize FFmpeg environment
 _bundled_ffmpeg_path = setup_ffmpeg_environment()
+
+print(f"[TRACE-7] FFmpeg setup complete. Path: {_bundled_ffmpeg_path}", flush=True, file=sys.stderr)
+sys.stderr.flush()
+
 if _bundled_ffmpeg_path:
     print(f"✓ Using bundled FFmpeg: {_bundled_ffmpeg_path}")
 else:
     print("⚠ Bundled FFmpeg not found, will try system FFmpeg")
+
+print("[TRACE-8] About to define _get_data_path function", flush=True, file=sys.stderr)
+sys.stderr.flush()
 
 # Resolve bundled data files (effects, icons, ui) across dev, PyInstaller onedir, and macOS .app Resources
 def _get_data_path(*parts: str) -> str:
@@ -171,9 +405,11 @@ def _get_writable_cache_dir(app_name: str, subdir: str = '') -> str:
         return root
 
 def qt_message_handler(mode, context, message):
-    """Custom Qt message handler to suppress libpng warnings"""
+    """Custom Qt message handler to suppress known noisy warnings"""
     if "libpng warning" in message and "iCCP" in message:
         return  # Suppress libpng iCCP warnings
+    if "JPEG datastream contains no image" in message:
+        return  # Suppress Qt camera MJPEG decode errors (corrupt frames from some USB cameras)
     # Allow other messages to pass through
     if mode == QtMsgType.QtDebugMsg:
         print(f"Qt Debug: {message}")
@@ -187,114 +423,30 @@ def qt_message_handler(mode, context, message):
 # Install the custom message handler
 qInstallMessageHandler(qt_message_handler)
 
+print("[STARTUP] Startup health check disabled temporarily for debugging", flush=True, file=sys.stderr)
 
 # ---------- Startup health check: memory & low-memory mode ----------
-try:
-    import psutil
-    from aggressive_memory_optimizer import get_aggressive_optimizer, force_memory_under_target, continuous_memory_management
-    from smart_cache import smart_cache
-    from memory_pool import general_memory_pool, image_memory_pool
-    # Check current memory and trigger optimizations if above target
-    proc = psutil.Process()
-    mem_mb = proc.memory_info().rss / 1024 / 1024
-    TARGET_MB = 250
-    if mem_mb > TARGET_MB:
-        print(f"⚠ High memory at startup: {mem_mb:.1f}MB — enabling low-memory fallback and running optimizations")
-        # Try light cache/pool clear first
-        try:
-            smart_cache.clear()
-        except Exception:
-            pass
-        try:
-            general_memory_pool.clear()
-        except Exception:
-            pass
-        try:
-            image_memory_pool.clear()
-        except Exception:
-            pass
-
-        # Run aggressive cleanup to attempt to get under target
-        try:
-            success = force_memory_under_target(TARGET_MB)
-            print(f"Memory cleanup success: {success}")
-        except Exception as e:
-            print(f"Error running aggressive memory cleanup: {e}")
-
-        # Reduce quality proactively
-        try:
-            from adaptive_quality import QualityLevel, quality_manager
-            quality_manager.set_quality_level(QualityLevel.LOW)
-        except Exception:
-            pass
-
-            # Continuous memory management enabled
-            try:
-                continuous_memory_management()
-            except Exception:
-                pass
-
-        # If still above target, apply extra low-memory fallbacks
-        try:
-            proc_mem_mb = proc.memory_info().rss / 1024 / 1024
-            if proc_mem_mb > TARGET_MB:
-                print(f"⚠ Memory still high ({proc_mem_mb:.1f}MB), applying extra low-memory fallbacks")
-                # Lower preview FPS and disable previews/effects in config
-                try:
-                    app_config.settings['ui']['preview_fps'] = 15
-                    app_config.settings['ui']['preview_quality'] = 'low'
-                    app_config.settings['ui']['show_tooltips'] = False
-                    app_config.settings['recording']['quality'] = 'low'
-                    app_config.save_settings()
-                except Exception:
-                    pass
-
-                # Reduce memory pool caps
-                try:
-                    general_memory_pool.max_memory = 100 * 1024 * 1024  # 100MB
-                    general_memory_pool.optimize()
-                except Exception:
-                    pass
-
-                try:
-                    image_memory_pool.max_memory = 150 * 1024 * 1024  # 150MB
-                    image_memory_pool.optimize()
-                except Exception:
-                    pass
-
-                # Shrink smart cache sizes
-                try:
-                    smart_cache.l1_max_size = 5
-                    smart_cache.l2_max_size = 10
-                    smart_cache.l3_cache.max_size_bytes = 50 * 1024 * 1024
-                    smart_cache.clear()
-                except Exception:
-                    pass
-
-                # Final garbage collect
-                try:
-                    import gc
-                    gc.collect()
-                except Exception:
-                    pass
-        except Exception:
-            pass
-except Exception:
-    # If psutil or optimizer unavailable, skip health check
-    pass
+# DISABLED TEMPORARILY FOR DEBUGGING - ENTIRE BLOCK COMMENTED OUT
+# (Original 100+ lines of memory optimization code removed for testing)
 
 
 class AspectRatioFrame(QFrame):
-    """Custom QFrame that maintains 16:9 aspect ratio"""
+    """Custom QFrame that maintains 16:9 aspect ratio with clipping for Windows overlay safety"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.aspect_ratio = 16.0 / 9.0
-        # Make sure this widget prefers width-driven sizing
+        # Make sure this widget prefers width-driven sizing with proper height-for-width support
         from PyQt6.QtWidgets import QSizePolicy
-        sp = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        sp = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         sp.setHeightForWidth(True)
         self.setSizePolicy(sp)
+        # ENABLE CLIPPING: Prevent overlays from painting outside frame bounds (Windows fix)
+        # These attributes ensure that any child widget or painted content is clipped to this frame
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setLineWidth(0)
+        self.setMidLineWidth(0)
     
     def sizeHint(self):
         """Return preferred size maintaining 16:9 aspect ratio"""
@@ -310,22 +462,29 @@ class AspectRatioFrame(QFrame):
     
     def heightForWidth(self, width):
         """Calculate height based on width to maintain 16:9 aspect ratio"""
+        # Pure 16:9 calculation - no reductions
+        # Qt's layout engine and container spacing handle all boundary safety
         return int(width / self.aspect_ratio)
+
     
     def resizeEvent(self, event):
         """Maintain aspect ratio during resize"""
         super().resizeEvent(event)
-        # Force the frame to keep 16:9 by clamping its height based on current width
-        w = max(1, self.width())
-        desired_h = int(w / self.aspect_ratio)
-        if desired_h != self.height():
-            # Avoid infinite loops by only adjusting when different
-            self.setMinimumHeight(desired_h)
-            self.setMaximumHeight(desired_h)
+        # Note: Do NOT set fixed min/max height here - it breaks layout on Windows
+        # The heightForWidth layout policy handles aspect ratio automatically
         # Ensure any child label will scale inside
         if hasattr(self, '_video_label'):
             self._video_label.setMinimumSize(1, 1)
-            self._video_label.setMaximumSize(16777215, 16777215)
+    
+    def paintEvent(self, event):
+        """Paint event with explicit clip region to prevent overlays from escaping bounds"""
+        # Set up a clip region to the widget's bounds before painting children
+        # This is the ultimate safety measure for Windows overlay containment
+        from PyQt6.QtGui import QPainter
+        painter = QPainter(self)
+        # Ensure clip region is set to widget rectangle (bounds)
+        painter.setClipRect(self.rect())
+        super().paintEvent(event)
 
 class ResponsiveEffectsWidget(QWidget):
     """Responsive widget that automatically adjusts effect thumbnails based on available width"""
@@ -334,8 +493,8 @@ class ResponsiveEffectsWidget(QWidget):
         super().__init__(parent)
         from PyQt6.QtWidgets import QGridLayout
         self.grid_layout = QGridLayout(self)
-        self.grid_layout.setSpacing(3)  # Reduced spacing between items
-        self.grid_layout.setContentsMargins(3, 3, 3, 3)  # Reduced edge padding
+        self.grid_layout.setSpacing(8)  # Increased spacing to prevent overlapping
+        self.grid_layout.setContentsMargins(8, 8, 8, 8)  # Increased margins for better spacing
         self.effects_buttons = []
         self.columns = 4  # Fixed 4 columns
         self.aspect_ratio = 16.0 / 9.0
@@ -463,9 +622,9 @@ class ResponsiveEffectsWidget(QWidget):
             
         # Calculate available width more accurately
         if parent_widget and hasattr(parent_widget, 'width'):
-            available_width = max(parent_widget.width() - 10, 400)  # Minimal margin
+            available_width = max(parent_widget.width() - 20, 400)  # Account for margins and padding
         else:
-            available_width = max(self.width() - 6, 400) if self.width() > 0 else 600
+            available_width = max(self.width() - 16, 400) if self.width() > 0 else 600
         
         # Clear existing layout
         for i in reversed(range(self.grid_layout.count())):
@@ -487,10 +646,11 @@ class ResponsiveEffectsWidget(QWidget):
             # Size the button; icon will be applied in batches
             btn_h = int(button_width / self.aspect_ratio)
             button.setFixedSize(button_width, btn_h)
+            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)  # Ensure fixed size
             self._pending_icons.append((button, button_width))
             
             # Add to grid
-            self.grid_layout.addWidget(button, row, col)
+            self.grid_layout.addWidget(button, row, col, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
             
             col += 1
             if col >= self.columns:
@@ -555,13 +715,483 @@ class ResponsiveEffectsWidget(QWidget):
             except Exception:
                 pass
 
+print("[STARTUP] About to define GoLiveStudio class...", flush=True, file=sys.stderr)
+sys.stderr.flush()
+
+from PyQt6.QtCore import pyqtSignal, QThread, QMetaObject, Q_ARG, pyqtSlot
+from PyQt6.QtMultimedia import QVideoFrame
+import queue
+
+# ============================================================================
+# MJPEG FORMAT SELECTOR - Prefers compressed over raw USB formats  
+# ============================================================================
+def _select_best_camera_format(camera_device, target_w, target_h, target_fps):
+    """
+    Select camera format with explicit pixel-format fallback order.
+    
+    Desired preference (user-requested):
+      NV12 -> YUY2 -> MJPEG -> RGB
+    
+    Windows lists each resolution twice:
+    - MJPEG (compressed, low bandwidth)
+    - YUY2/NV12 (raw uncompressed, high bandwidth)
+    
+    Previous code just picked the first match — unreliable. This function
+    explicitly prefers MJPEG.
+    """
+    from PyQt6.QtMultimedia import QVideoFrameFormat
+    
+    all_formats = camera_device.videoFormats()
+
+    def _pf_name(pf):
+        try:
+            if pf == QVideoFrameFormat.PixelFormat.Format_Jpeg:
+                return "MJPEG"
+        except Exception:
+            pass
+        try:
+            return str(pf).split('.')[-1]
+        except Exception:
+            return str(pf)
+
+    def _pf_rank(pf):
+        """Lower is better."""
+        PF = QVideoFrameFormat.PixelFormat
+        # Order requested by user:
+        # NV12 -> YUY2 -> MJPEG -> RGB
+        try:
+            if pf == PF.Format_NV12:
+                return 0
+        except Exception:
+            pass
+        # Qt names vary across platforms/drivers; treat common packed YUV as 'YUY2 bucket'
+        try:
+            if pf in (getattr(PF, 'Format_YUYV', None), getattr(PF, 'Format_UYVY', None), getattr(PF, 'Format_YUV422P', None)):
+                return 1
+        except Exception:
+            pass
+        try:
+            if pf == PF.Format_Jpeg:
+                return 2
+        except Exception:
+            pass
+        # RGB / RGBA / BGRA etc.
+        try:
+            if pf in (
+                getattr(PF, 'Format_RGBX8888', None),
+                getattr(PF, 'Format_RGBA8888', None),
+                getattr(PF, 'Format_BGRX8888', None),
+                getattr(PF, 'Format_BGRA8888', None),
+                getattr(PF, 'Format_RGB888', None),
+                getattr(PF, 'Format_BGR888', None),
+            ):
+                return 3
+        except Exception:
+            pass
+        # Anything else, last
+        return 4
+
+    def _fmt_score(fmt):
+        res = fmt.resolution()
+        w = int(res.width())
+        h = int(res.height())
+        fps_max = float(fmt.maxFrameRate())
+        pf = fmt.pixelFormat()
+
+        # Prefer exact resolution; then higher fps; then pixel format rank.
+        # Use negative values for preferred properties in tuple sort.
+        exact_res = 0 if (w == target_w and h == target_h) else 1
+        fps_ok = 0 if fps_max >= float(target_fps) else 1
+        pf_rank = _pf_rank(pf)
+        # Prefer higher fps_max within the same bucket
+        return (exact_res, fps_ok, pf_rank, -fps_max)
+    
+    # Print format list with pixel format info
+    print("Qt camera supported formats (with pixel format):")
+    format_list = []
+    for fmt in all_formats:
+        res = fmt.resolution()
+        w = int(res.width())
+        h = int(res.height())
+        fps_max = float(fmt.maxFrameRate())
+        pf = fmt.pixelFormat()
+        pf_name = _pf_name(pf)
+        format_list.append((w, h, fps_max, pf_name, fmt))
+        print(f"  - {w}x{h} @ up to {fps_max:.0f}fps [{pf_name}]")
+
+    if not all_formats:
+        print(f"[CAMERA] ❌ No formats reported by device")
+        return None, target_fps
+
+    best = min(all_formats, key=_fmt_score)
+    try:
+        res = best.resolution()
+        w = int(res.width())
+        h = int(res.height())
+        fps_max = float(best.maxFrameRate())
+        pf = best.pixelFormat()
+        pf_name = _pf_name(pf)
+        print(f"[CAMERA] ✅ Selected format: {w}x{h} @ {fps_max:.0f}fps [{pf_name}]")
+        return best, int(fps_max) if fps_max > 0 else int(target_fps)
+    except Exception:
+        return best, target_fps
+
+
+print("[STARTUP] About to define GoLiveStudio class...", flush=True, file=sys.stderr)
+sys.stderr.flush()
+
+from PyQt6.QtCore import pyqtSignal, QThread, QMetaObject, Q_ARG, pyqtSlot
+from PyQt6.QtMultimedia import QVideoFrame
+import queue
+
+# ============================================================================
+# FRAME PROCESSING WORKER - Moves expensive frame processing off GUI thread
+# ============================================================================
+class FrameProcessingWorker:
+    """
+    Per-input worker thread that processes camera frames off the GUI thread.
+    Receives QImage from GUI thread, converts + processes, stores result.
+    Uses bounded queue (maxsize=2) — drops old frames if processing is slow.
+    
+    FIX FOR WINDOWS: GUI thread can't keep up with 60fps frame influx on Windows
+    (expensive toImage() + scaling + cache updates). This worker moves that work
+    to a background thread, keeping GUI thread responsive.
+    """
+    def __init__(self, input_number, on_frame_ready_callback):
+        self._input_number = input_number
+        self._on_frame_ready = on_frame_ready_callback
+        self._queue = queue.Queue(maxsize=2)
+        self._running = True
+        self._thread = threading.Thread(
+            target=self._run, daemon=True,
+            name=f"FrameWorker-Input{input_number}"
+        )
+        self._thread.start()
+        
+        # FPS tracking
+        self._fps_count = 0
+        self._fps_clock = time.perf_counter()
+        self._frame_count = 0
+
+    def process_frame(self, qimage, input_number):
+        """Non-blocking. Drops oldest frames when processing can't keep up (OBS-style)."""
+        try:
+            self._queue.put_nowait((qimage, input_number))
+        except queue.Full:
+            try:
+                _ = self._queue.get_nowait()
+            except Exception:
+                return
+            try:
+                self._queue.put_nowait((qimage, input_number))
+            except Exception:
+                pass
+    
+    def process_video_frame(self, video_frame, input_number):
+        """Process QVideoFrame directly (moves expensive toImage() to worker thread)."""
+        try:
+            # Convert QVideoFrame to QImage on worker thread (NOT GUI thread!)
+            # This avoids blocking GUI with JPEG decode for MJPEG frames
+            img = video_frame.toImage()
+            if img is None or img.isNull():
+                return
+            # Queue the converted image
+            self._queue.put_nowait((img, input_number))
+        except queue.Full:
+            try:
+                _ = self._queue.get_nowait()
+            except Exception:
+                return
+            try:
+                self._queue.put_nowait((img, input_number))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _run(self):
+        """Worker thread main loop."""
+        while self._running:
+            try:
+                qimage, input_number = self._queue.get(timeout=0.1)
+                self._process(qimage, input_number)
+            except queue.Empty:
+                continue
+            except Exception:
+                pass
+
+    def _process(self, qimage, input_number):
+        """Convert QVideoFrame/QImage to a safe QImage copy and forward to GUI thread."""
+        try:
+            # IMPORTANT:
+            # Converting to numpy and then back to QImage on the GUI thread is costly and
+            # commonly caps effective FPS (~30fps). For display + caching we only need QImage.
+            # Make a defensive copy because Qt may reuse internal buffers.
+            img = qimage.copy()
+            width = img.width()
+            height = img.height()
+            
+            # FPS tracking
+            self._frame_count += 1
+            self._fps_count += 1
+            now = time.perf_counter()
+            if now - self._fps_clock >= 1.0:
+                actual_fps = self._fps_count / (now - self._fps_clock)
+                self._fps_clock = now
+                self._fps_count = 0
+                print(f"Input-{self._input_number} actual FPS: {actual_fps:.1f}")
+                if self._frame_count % 60 == 0:
+                    print(f"Input-{self._input_number} Frame #{self._frame_count}: {width}x{height}")
+            
+            # Call back to main thread with processed QImage
+            self._on_frame_ready(self._input_number, img)
+            
+        except Exception as e:
+            pass
+
+    def stop(self):
+        """Stop the worker thread cleanly."""
+        self._running = False
+        self._thread.join(timeout=1.0)
+
+
+# ============================================================================
+# QIMAGE RING BUFFER - Thread-safe circular buffer for QImage frames (OBS-style)
+# ============================================================================
+from typing import Optional
+
+class QImageRingBuffer:
+    """
+    Thread-safe ring buffer for QImage frames (like OBS NUM_TEXTURES).
+    Stores limited frames; new frames overwrite oldest.
+    Render thread reads latest frame at fixed FPS.
+    """
+    
+    def __init__(self, maxlen: int = 3):
+        self._buf = []
+        self._maxlen = maxlen
+        self._lock = threading.Lock()
+        self._write_idx = 0
+        # Pre-allocate slots
+        for _ in range(maxlen):
+            self._buf.append(None)
+    
+    def put(self, frame: QImage):
+        """Add frame to buffer. Thread-safe."""
+        with self._lock:
+            # Store copy to prevent reference issues
+            if frame is not None and not frame.isNull():
+                self._buf[self._write_idx] = frame.copy()
+            else:
+                self._buf[self._write_idx] = None
+            self._write_idx = (self._write_idx + 1) % self._maxlen
+    
+    def get_latest(self) -> Optional[QImage]:
+        """Get most recent frame without removing. Thread-safe."""
+        with self._lock:
+            # Read from write_idx - 1 (most recent)
+            read_idx = (self._write_idx - 1) % self._maxlen
+            frame = self._buf[read_idx]
+            if frame is not None and not frame.isNull():
+                return frame.copy()
+            return None
+    
+    def clear(self):
+        """Clear all frames."""
+        with self._lock:
+            for i in range(len(self._buf)):
+                self._buf[i] = None
+
+
+# ============================================================================
+# FRAME CONVERTER WORKER - Moves expensive QVideoFrame.toImage() off main thread
+# ============================================================================
+class FrameConverterWorker(QObject):
+    """
+    Worker that converts QVideoFrame to QImage on a background thread.
+    Also pre-scales to 720p to prevent main thread blocking during scaling.
+    """
+    # Signal: emitted with both full-res and pre-scaled QImage back to main thread
+    frame_converted = pyqtSignal(int, QImage, QImage)  # (input_number, full_res, scaled_720p)
+    
+    def __init__(self):
+        super().__init__()
+        self._throttle = {}  # FPS throttle per input
+    
+    @pyqtSlot(int, QVideoFrame)
+    def convert_frame(self, input_number: int, video_frame: QVideoFrame):
+        """
+        Convert QVideoFrame to QImage on background thread.
+        Also pre-scale to 720p (this is expensive, so do it here not on main thread).
+        
+        Args:
+            input_number: Camera input number
+            video_frame: Qt QVideoFrame from camera
+        """
+        try:
+            # FIXED: Remove throttling - convert EVERY frame without dropping
+            # Frame deduplication happens in frame provider via frame_id check
+            import time
+            from collections import deque
+            now = time.perf_counter()
+            
+            # Track raw delivery rate for diagnostics
+            if not hasattr(self, '_converter_frame_times'):
+                self._converter_frame_times = {}
+            if input_number not in self._converter_frame_times:
+                self._converter_frame_times[input_number] = deque(maxlen=120)
+            self._converter_frame_times[input_number].append(now)
+            
+            # Report every 5 seconds
+            if not hasattr(self, '_converter_fps_report'):
+                self._converter_fps_report = {}
+            last_report = self._converter_fps_report.get(input_number, 0.0)
+            if now - last_report >= 5.0:
+                times = self._converter_frame_times[input_number]
+                if len(times) > 1:
+                    span = times[-1] - times[0]
+                    raw_rate = (len(times) - 1) / span if span > 0 else 0
+                    print(f"[CONVERTER-DELIVERY] Input-{input_number}: camera delivering {raw_rate:.1f}fps")
+                    self._converter_fps_report[input_number] = now
+            
+            # Convert to QImage (this is expensive, but now on background thread)
+            img = video_frame.toImage()
+            if img is None or img.isNull():
+                return
+            
+            # Copy the image (video_frame may be reused by Qt)
+            img = img.copy()
+            
+            # PRE-SCALE to common output sizes on background thread
+            # This prevents expensive scaling on the main thread
+            pre_scaled_sizes = [
+                (1280, 720),   # 720p for thumbnails
+                (1920, 1080),  # 1080p full-res
+                (1710, 1073),  # Mirror size (Retina MacBook Pro scaled)
+                (1710, 1107),  # Mirror size alternative
+            ]
+            
+            scaled_images = {}
+            for target_w, target_h in pre_scaled_sizes:
+                # Skip if same as original
+                if img.width() == target_w and img.height() == target_h:
+                    continue
+                scaled = img.scaled(
+                    target_w, target_h,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.FastTransformation
+                )
+                scaled_images[(target_w, target_h)] = scaled
+            
+            # Use 1280x720 as the default scaled version for UI
+            scaled_720p = scaled_images.get((1280, 720), img)
+            
+            # Emit full-res and 720p back to main thread
+            self.frame_converted.emit(input_number, img, scaled_720p)
+            
+            # ALSO emit other pre-scaled sizes as separate signals so they get cached
+            # This prevents cache misses for mirror sizes
+            for size_key, scaled_img in scaled_images.items():
+                if size_key != (1280, 720):  # 720p already emitted
+                    # Emit as additional frame with that specific size
+                    # This will be cached in last_input_image_scaled
+                    self.frame_converted.emit(input_number, img, scaled_img)
+            
+        except Exception as e:
+            import time as time_module
+            if not hasattr(self, '_last_error_time'):
+                self._last_error_time = 0.0
+            now = time_module.time()
+            if now - self._last_error_time > 1.0:
+                print(f"FrameConverterWorker error: {e}")
+                self._last_error_time = now
+
+
+def _diag_error(context: str, error: Exception, extra: str = ""):
+    """Pinpoints exactly where an error occurred with full context."""
+    tb = traceback.extract_tb(error.__traceback__)
+    if tb:
+        last = tb[-1]
+        file_short = os.path.basename(last.filename)
+        line = last.lineno
+        func = last.name
+        print(f"\n{'='*60}")
+        print(f"[ERROR] ❌ {context}")
+        print(f"[ERROR]    File    : {file_short} (full: {last.filename})")
+        print(f"[ERROR]    Line    : {line}")
+        print(f"[ERROR]    Function: {func}")
+        print(f"[ERROR]    Type    : {type(error).__name__}")
+        print(f"[ERROR]    Message : {error}")
+        if extra:
+            print(f"[ERROR]    Context : {extra}")
+        print(f"[ERROR]    Stack trace:")
+        for frame in tb:
+            print(f"[ERROR]      → {os.path.basename(frame.filename)}:"
+                  f"{frame.lineno} in {frame.name}")
+        print(f"{'='*60}\n")
+    else:
+        print(f"[ERROR] ❌ {context}: {type(error).__name__}: {error}")
+
+
 class GoLiveStudio(QMainWindow):
+    camera_frame_ready = pyqtSignal(int, object)
     def __init__(self):
         super().__init__()
         # Initialize all optimization systems first
         self._init_optimization_systems()
         # Initialize unified timer system
         timer_manager.initialize(self)
+        # Initialize transition attributes early (before load_ui) to prevent AttributeError
+        self.transition_manager = TransitionManager(self)
+        self.selected_transition = 'None'
+        self.transition_duration_ms = 700
+        self.transition_easing = 'ease_in_out'
+        self._transition_running = False
+        
+        # Initialize graphics output widget (will be created in _ensure_output_preview_label)
+        self._graphics_output = None
+        
+        # Initialize OBS-style camera pipeline managers (per-input camera control)
+        self.camera_managers = {}  # dict of {input_number: SignaledCameraManager}
+        self.obs_camera_pipeline_enabled = OBS_CAMERA_PIPELINE_AVAILABLE
+        
+        # Initialize macOS native helper (AVFoundation camera, VideoToolbox encoder)
+        self._macos_native = None
+        if MACOS_NATIVE_AVAILABLE and platform.system() == "Darwin":
+            try:
+                self._macos_native = get_macos_helper(self)
+                self._macos_native.print_status()
+            except Exception as e:
+                print(f"[INIT] macOS native helper initialization failed: {e}")
+        
+        # Initialize per-input frame processing workers (moves frame processing off GUI thread)
+        self._frame_workers = {}  # input_number -> FrameProcessingWorker
+        
+        # Initialize frame converter worker (moves QVideoFrame.toImage() to background thread)
+        self._converter_thread = QThread()
+        self._converter_worker = FrameConverterWorker()
+        self._converter_worker.moveToThread(self._converter_thread)
+        # Connect frame_converted signal to main thread for UI updates (QueuedConnection is thread-safe)
+        self._converter_worker.frame_converted.connect(
+            self._on_frame_converted_from_worker,
+            Qt.ConnectionType.QueuedConnection
+        )
+        self._converter_thread.start()
+        
+        # Initialize deferred frame processing flags (prevents event queue flooding)
+        # Maps input_number -> bool, where True means a timer event is pending
+        self._qt_frame_deferred_pending = {}
+        # Tracks which inputs have pending deferred frame processing timers
+        self._qt_frame_timer_pending = set()
+        
+        # OBS-STYLE: Initialize ring buffers for each input (like OBS NUM_TEXTURES)
+        # This decouples capture thread from render thread for smooth playback
+        self._input_frame_buffers = {}  # input_number -> QImageRingBuffer
+        
+        # Initialize scaled frame cache (prevents expensive scaling on streaming background thread)
+        # Maps (input_number, width, height) -> pre-scaled QImage
+        self.last_input_image_scaled = {}
+        
         self.load_ui()
         # Connect UI signals to their slots
         self.connect_signals()
@@ -571,6 +1201,11 @@ class GoLiveStudio(QMainWindow):
         self._set_performance_mode()
         # Connect quality manager signals
         self._connect_quality_signals()
+        # Connect camera frame ready signal to UI update slot
+        # CRITICAL: Use QueuedConnection to ensure text rendering happens on main thread
+        # This prevents Qt crashes when QImage/QPainter operations occur on camera thread
+        from PyQt6.QtCore import Qt as QtCore
+        self.camera_frame_ready.connect(self._on_camera_frame_ready, QtCore.ConnectionType.QueuedConnection)
         
         # Initialize global FPS controller
         if FPS_CONTROLLER_AVAILABLE:
@@ -579,7 +1214,7 @@ class GoLiveStudio(QMainWindow):
                 self.streaming_manager = get_streaming_manager()
                 
                 # Set initial FPS from configuration
-                initial_fps = int(app_config.get('ui.preview_fps', 60))
+                initial_fps = int(app_config.get('ui.preview_fps', 30))
                 self.fps_controller.set_target_fps(initial_fps)
                 self.fps_controller.start()
                 
@@ -597,18 +1232,88 @@ class GoLiveStudio(QMainWindow):
             performance_monitor.start_monitoring()
         except Exception as _e:
             print(f"Performance monitor start warning: {_e}")
+        
+        # Force layout after app fully loads (1 second delay allows Qt to fully render)
+        QTimer.singleShot(1000, self.apply_forced_layout)
+
+    def showEvent(self, event):
+        """Override showEvent to force layout when window first appears."""
+        super().showEvent(event)
+        # Call forced layout immediately after window is shown
+        self.apply_forced_layout()
+        # Ensure stream controllers initialize (resizeEvent may not fire on first show)
+        QTimer.singleShot(150, self._on_deferred_resize)
+
+    def changeEvent(self, event):
+        try:
+            super().changeEvent(event)
+        except Exception:
+            pass
+        try:
+            if event is not None and event.type() == QEvent.Type.WindowStateChange:
+                # When window state changes (maximize, restore, minimize), refresh layout and styles
+                window_state = self.windowState()
+                # Refresh layout for both maximize and restore states
+                if not (window_state & Qt.WindowState.WindowMinimized):
+                    # Window is now visible/normal - refresh layout
+                    if hasattr(self, '_apply_monitor_area_height_policy'):
+                        try:
+                            QTimer.singleShot(0, self._apply_monitor_area_height_policy)
+                        except Exception:
+                            self._apply_monitor_area_height_policy()
+                    # Also refresh the main layout to restore styles/borders
+                    if hasattr(self, 'apply_forced_layout'):
+                        try:
+                            QTimer.singleShot(50, self.apply_forced_layout)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
     
     def _init_optimization_systems(self):
         """Initialize all optimization systems."""
-        # Initialize GL context manager
-        gl_context_manager.initialize()
+        # Initialize GL context manager (only if available)
+        try:
+            if gl_context_manager:
+                gl_context_manager.initialize()
+        except Exception as e:
+            print(f"[WARNING] Could not initialize gl_context_manager: {e}")
+        
+        # Initialize GPU acceleration (Phase 2)
+        if GPU_ACCELERATION_AVAILABLE:
+            try:
+                initialize_gpu_acceleration()
+                print("[GPU] GPU acceleration initialized successfully")
+            except Exception as e:
+                print(f"[GPU] Failed to initialize GPU acceleration: {e}")
+        
+        # Initialize Phase 3: Full GPU Pipeline with zero-copy
+        if GPU_PIPELINE_AVAILABLE:
+            try:
+                initialize_gpu_pipeline()
+                print("[GPU] Phase 3 GPU Pipeline initialized successfully")
+            except Exception as e:
+                print(f"[GPU] Failed to initialize Phase 3 GPU Pipeline: {e}")
         
         # Set up memory pools
-        general_memory_pool.optimize()
-        image_memory_pool.optimize()
+        try:
+            if general_memory_pool:
+                general_memory_pool.optimize()
+        except Exception:
+            pass
+        
+        try:
+            if image_memory_pool:
+                image_memory_pool.optimize()
+        except Exception:
+            pass
         
         # Configure smart cache
-        smart_cache.clear()  # Start fresh
+        try:
+            if smart_cache:
+                smart_cache.clear()  # Start fresh
+        except Exception:
+            pass
         
         # Set up event coalescers
         event_coalescer.register_handler('ui_update', self._handle_coalesced_ui_update)
@@ -707,96 +1412,168 @@ class GoLiveStudio(QMainWindow):
                 print("Performance mode: Balanced (Mid-range system detected)")
             else:
                 fps_manager.set_performance_mode('performance')
-                print("Performance mode: Performance (Resource-constrained system)")
-        except:
-            fps_manager.set_performance_mode('balanced')
-            print("Performance mode: Balanced (default)")
+        except Exception as e:
+            print(f"Error setting performance mode: {e}")
+
+    def resizeEvent(self, event):
+        try:
+            super().resizeEvent(event)
+        except Exception:
+            pass
+        # Debounce expensive rescale operations during interactive resize
+        try:
+            if not hasattr(self, '_resize_timer'):
+                self._resize_timer = QTimer(self)
+                self._resize_timer.setSingleShot(True)
+                self._resize_timer.timeout.connect(self._on_deferred_resize)
+            # Restart debounce timer (100ms)
+            self._resize_timer.start(100)
+        except Exception:
+            # Fallback: call directly (best-effort)
+            try:
+                self._on_deferred_resize()
+            except Exception:
+                pass
+
+    def _on_deferred_resize(self):
+        """Deferred resize handler: rescale cached preview images to current widget sizes.
+
+        Uses already-cached full-resolution QImages in `self.last_input_image` to create
+        scaled pixmaps quickly without re-reading camera frames.
+        """
+        try:
+            from PyQt6.QtGui import QPixmap
+            from PyQt6.QtCore import Qt, QSize
+            if hasattr(self, 'last_input_image'):
+                for input_number, q_image in list(self.last_input_image.items()):
+                    try:
+                        if q_image is None:
+                            continue
+                        try:
+                            video_widget = getattr(self, f'inputVideoFrame{input_number}')
+                        except Exception:
+                            video_widget = None
+                        pixmap = QPixmap.fromImage(q_image)
+                        if video_widget is not None:
+                            widget_size = video_widget.size()
+                            if widget_size.width() <= 1 or widget_size.height() <= 1:
+                                min_size = video_widget.minimumSize()
+                                widget_size = min_size if min_size.isValid() else QSize(320, 180)
+                            if widget_size.width() > 0 and widget_size.height() > 0:
+                                scaled = pixmap.scaled(
+                                    widget_size,
+                                    Qt.AspectRatioMode.KeepAspectRatio,
+                                    Qt.TransformationMode.SmoothTransformation
+                                )
+                                if hasattr(video_widget, 'label'):
+                                    video_widget.label.setPixmap(scaled)
+                                elif hasattr(video_widget, '_video_label'):
+                                    video_widget._video_label.setPixmap(scaled)
+                                else:
+                                    # create a lightweight QLabel if needed
+                                    try:
+                                        from PyQt6.QtWidgets import QLabel, QVBoxLayout, QSizePolicy
+                                        video_widget._video_label = QLabel(video_widget)
+                                        if not video_widget.layout():
+                                            layout = QVBoxLayout(video_widget)
+                                            layout.setContentsMargins(0, 0, 0, 0)
+                                            video_widget.setLayout(layout)
+                                        video_widget._video_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+                                        video_widget.layout().addWidget(video_widget._video_label)
+                                        video_widget._video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                                        video_widget._video_label.setScaledContents(True)
+                                        video_widget._video_label.setPixmap(scaled)
+                                    except Exception:
+                                        pass
+                                try:
+                                    self.last_input_pixmap[input_number] = scaled
+                                except Exception:
+                                    pass
+                    except Exception:
+                        continue
+        except Exception as e:
+            print(f"Error during deferred resize: {e}")
         try:
             overscan = app_config.get('ui.overscan', 1.00)
             fps = app_config.get('ui.preview_fps', 60)
             if self._graphics_output is not None:
                 self._graphics_output.set_overscan(overscan)
                 self._graphics_output.set_target_fps(fps)
-            # Don't auto-restore last effect - effects should be cleared by default
-            # last_effect = app_config.get('ui.last_effect', None)
-            # if last_effect and os.path.exists(last_effect) and self._graphics_output is not None:
-            #     self._graphics_output.set_overlay_from_path(last_effect)
+            # Do NOT auto-apply any effect at startup (as per required workflow)
         except Exception as e:
             print(f"Error restoring settings: {e}")
 
-        # Transitions
-        self.transition_manager = TransitionManager(self)
-        # Lock to prevent normal output updates during transitions (prevents flicker)
-        self._transition_running = False
-        self.selected_transition = app_config.get('ui.transition.type', 'None')
-        self.transition_duration_ms = int(app_config.get('ui.transition.duration_ms', 700))
-        self.transition_easing = app_config.get('ui.transition.easing', 'ease_in_out')
+        # Transitions (transition_manager already initialized in __init__)
+        # Load transition settings from config
+        self.selected_transition = app_config.get('ui.transition.type', self.selected_transition)
+        self.transition_duration_ms = int(app_config.get('ui.transition.duration_ms', self.transition_duration_ms))
+        self.transition_easing = app_config.get('ui.transition.easing', self.transition_easing)
         try:
             self.setup_transitions_panel()
         except Exception as e:
             print(f"Error setting up transitions panel: {e}")
 
-        # Streaming controller
-        self.stream_controller = StreamController(self)
-        self.stream_controller.set_frame_provider(self._provide_stream_frame)
-        try:
-            self.stream_controller.statusChanged.connect(self._on_stream_status_changed)
-        except Exception:
-            pass
+        # Streaming controller (one-time init; skip if already done)
+        if not hasattr(self, 'stream_controller') or self.stream_controller is None:
+            self.stream_controller = StreamController(self)
+            self.stream_controller.set_frame_provider(self._provide_stream_frame)
+            try:
+                self.stream_controller.statusChanged.connect(self._on_stream_status_changed)
+            except Exception:
+                pass
 
         # External Display Mirror controller - Enhanced version fixes pixelation
-        try:
-            if _USE_ENHANCED_MIRROR:
-                self.mirror_controller = EnhancedDisplayMirrorController(self)
-                print("Enhanced Display Mirror Controller initialized with pixelation fixes")
-            else:
-                self.mirror_controller = DisplayMirrorController(self)
-                print("Standard Display Mirror Controller initialized")
-            self.mirror_controller.set_frame_provider(self._provide_stream_frame)
-        except Exception as e:
-            print(f"Error initializing DisplayMirrorController: {e}")
+        if not hasattr(self, 'mirror_controller') or self.mirror_controller is None:
+            try:
+                if _USE_ENHANCED_MIRROR:
+                    self.mirror_controller = EnhancedDisplayMirrorController(self)
+                    print("Enhanced Display Mirror Controller initialized with pixelation fixes")
+                else:
+                    self.mirror_controller = DisplayMirrorController(self)
+                    print("Standard Display Mirror Controller initialized")
+                self.mirror_controller.set_frame_provider(self._provide_stream_frame)
+            except Exception as e:
+                print(f"Error initializing DisplayMirrorController: {e}")
 
-        # Independent RTMP stream controllers (Stream 1 and Stream 2)
-        try:
-            print("🎬 Initializing stream controllers...")
-            self.stream_controllers = {
-                1: StreamController(self),
-                2: StreamController(self),
-            }
-            for stream_id, sc in self.stream_controllers.items():
-                sc.set_frame_provider(self._provide_stream_frame)
-                sc.statusChanged.connect(self._on_stream_status_changed)
-                print(f"✅ Stream {stream_id} controller initialized")
-            
-            # Initialize stream states
-            self.stream1_active = False
-            self.stream2_active = False
-            print("✅ Stream controllers initialized successfully")
-        except Exception as e:
-            print(f"❌ Error initializing StreamControllers: {e}")
-            import traceback
-            traceback.print_exc()
+        # Independent RTMP stream controllers (Stream 1 and Stream 2) - one-time init
+        if not hasattr(self, 'stream_controllers') or not isinstance(self.stream_controllers, dict):
+            try:
+                print("🎬 Initializing stream controllers...")
+                self.stream_controllers = {
+                    1: StreamController(self),
+                    2: StreamController(self),
+                }
+                for stream_id, sc in self.stream_controllers.items():
+                    sc.set_frame_provider(self._provide_stream_frame)
+                    sc.on_log(self._on_stream_log)
+                    try:
+                        sc.statusChanged.connect(lambda st, sid=int(stream_id): self._on_stream_status_changed(st, sid))
+                    except Exception:
+                        sc.statusChanged.connect(self._on_stream_status_changed)
+                    print(f"✅ Stream {stream_id} controller initialized")
+                self.stream1_active = False
+                self.stream2_active = False
+                print("✅ Stream controllers initialized successfully")
+            except Exception as e:
+                print(f"❌ Error initializing StreamControllers: {e}")
+                import traceback
+                traceback.print_exc()
 
-        # Enhanced Recording controller
-        try:
-            print("🎥 Initializing recording controller...")
-            self.recorder_controller = RecorderController(self)
-            # Provide program output frames to the recorder
-            self.recorder_controller.set_frame_provider(self._provide_stream_frame)
-            self.recorder_controller.on_log(self._on_record_log)
-            self.recorder_controller.statusChanged.connect(self._on_record_status_changed)
-            
-            # Initialize recording state
-            self.recording = False
-            
-            print("✅ Recording controller initialized successfully")
-            
-            # Show recording health info on startup
-            self.show_recording_health_info()
-        except Exception as e:
-            print(f"❌ Error initializing RecorderController: {e}")
-            import traceback
-            traceback.print_exc()
+        # Enhanced Recording controller - one-time init
+        if not hasattr(self, 'recorder_controller') or self.recorder_controller is None:
+            try:
+                print("🎥 Initializing recording controller...")
+                self.recorder_controller = RecorderController(self)
+                self.recorder_controller.set_frame_provider(self._provide_stream_frame)
+                self.recorder_controller.on_log(self._on_record_log)
+                self.recorder_controller.statusChanged.connect(self._on_record_status_changed)
+                self.recording = False
+                print("✅ Recording controller initialized successfully")
+                self.show_recording_health_info()
+            except Exception as e:
+                print(f"❌ Error initializing RecorderController: {e}")
+                import traceback
+                traceback.print_exc()
 
         # Install graphics output view if not present yet
         try:
@@ -805,39 +1582,2100 @@ class GoLiveStudio(QMainWindow):
             pass
 
         # Add compact Text Overlay mini bar beside Switching Controls (without altering other UI)
+        # (Removed as we are moving it to the main layout in apply_modern_redesign)
+        pass
+
+    def apply_modern_redesign(self):
+        print("🎨 Applying Premium Production Redesign...")
+        
+        # --- Wrap preview and program monitors in AspectRatioFrame for 16:9 ratio ---
+        from PyQt6.QtWidgets import QVBoxLayout
+        if hasattr(self, 'preview_container'):
+            ar_preview = AspectRatioFrame()
+            ar_preview.setObjectName('arPreview')
+            ar_preview.setMinimumSize(320, 180)
+            ar_preview.setSizePolicy(self.preview_container.sizePolicy())
+            layout = QVBoxLayout(ar_preview)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(self.preview_container)
+            self.preview_container.setParent(ar_preview)
+            self.preview_container = ar_preview
+        if hasattr(self, 'program_container'):
+            ar_program = AspectRatioFrame()
+            ar_program.setObjectName('arProgram')
+            ar_program.setMinimumSize(320, 180)
+            ar_program.setSizePolicy(self.program_container.sizePolicy())
+            layout = QVBoxLayout(ar_program)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(self.program_container)
+            self.program_container.setParent(ar_program)
+            self.program_container = ar_program
+
+        # Force a wider window size for desktop-app feel
+        self.resize(1600, 950)
+        
+        # --- Premium Production Stylesheet ---
+        self.setStyleSheet("""
+            /* Global Reset & Typography */
+            QMainWindow { background-color: #1C1C1C; color: #E0E0E0; }
+            QWidget { font-family: 'Inter', 'SF Pro Display', 'Segoe UI', sans-serif; font-size: 13px; color: #E0E0E0; }
+            
+            /* Panels & Containers */
+            QFrame { border: none; }
+            
+            /* Left Sidebar (Nav Rail) */
+            QFrame#modernSidebar { 
+                background-color: #222222; 
+                border-right: 1px solid #333; 
+            }
+            
+            /* Monitor Frames */
+            QFrame#previewMonitor { 
+                background-color: #000; 
+                border: 2px solid #007AFF; 
+                border-radius: 6px; 
+            }
+            QFrame#programMonitor { 
+                background-color: #000; 
+                border: 2px solid #FF3B30; 
+                border-radius: 6px; 
+            }
+            
+            /* Deck Panels (Inputs, Media, Effects) */
+            QFrame#deckPanel {
+                background-color: #252525;
+                border: 1px solid #333;
+                border-radius: 8px;
+            }
+            
+            /* Status Bar */
+            QFrame#statusBar {
+                background-color: #181818;
+                border-top: 1px solid #333;
+            }
+            
+            /* Buttons - General Premium Style */
+            QPushButton { 
+                background-color: #333; 
+                border: 1px solid #444; 
+                border-radius: 4px; 
+                padding: 6px 12px; 
+                color: #EEE;
+                font-weight: 500;
+            }
+            QPushButton:hover { background-color: #404040; border-color: #555; }
+            QPushButton:pressed { background-color: #007AFF; border-color: #007AFF; color: white; }
+            QPushButton:checked { background-color: #005BB5; border-color: #005BB5; color: white; }
+            
+            /* Sidebar Buttons (Nav Rail Icons) */
+            QPushButton#sidebarBtn {
+                background-color: transparent;
+                border: none;
+                border-radius: 8px;
+                padding: 12px;
+                text-align: center;
+                color: #888;
+            }
+            QPushButton#sidebarBtn:hover { 
+                background-color: #333; 
+                color: #FFF;
+            }
+            QPushButton#sidebarBtn:checked { 
+                background-color: #333; 
+                color: #007AFF;
+                border-left: 3px solid #007AFF;
+            }
+            
+            /* Record Button Special State */
+            QPushButton#recordBtn {
+                color: #FF3B30;
+            }
+            QPushButton#recordBtn:checked {
+                background-color: rgba(255, 59, 48, 0.1);
+                color: #FF3B30;
+                border: 1px solid #FF3B30;
+            }
+            
+            /* Labels */
+            QLabel#monitorLabel { 
+                font-weight: 700; 
+                font-size: 11px; 
+                letter-spacing: 1px; 
+                padding: 4px 8px;
+                background: rgba(0,0,0,0.6);
+                border-radius: 4px;
+            }
+            QLabel#sectionHeader { 
+                font-weight: 600; 
+                font-size: 11px; 
+                color: #888; 
+                text-transform: uppercase; 
+                letter-spacing: 0.5px;
+            }
+            
+            /* Status Bar Text */
+            QLabel#statusLabel { font-family: 'Menlo', monospace; font-size: 11px; color: #888; }
+            QLabel#statusValue { font-family: 'Menlo', monospace; font-size: 11px; color: #EEE; font-weight: bold; }
+            
+            /* Sliders */
+            QSlider::groove:horizontal { background: #333; height: 4px; border-radius: 2px; }
+            QSlider::sub-page:horizontal { background: #007AFF; border-radius: 2px; }
+            QSlider::handle:horizontal { 
+                background: #E0E0E0; 
+                width: 14px; height: 14px; 
+                margin: -5px 0; 
+                border-radius: 7px; 
+                border: 1px solid #000;
+            }
+            
+            /* Scrollbars */
+            QScrollBar:vertical { background: #1C1C1C; width: 10px; margin: 0; }
+            QScrollBar::handle:vertical { background: #444; min-height: 20px; border-radius: 5px; margin: 2px; }
+            QScrollBar::handle:vertical:hover { background: #555; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+        """)
+
+        # 1. Setup Main Layout Structure
+        new_root_widget = QWidget()
+        new_root_layout = QVBoxLayout(new_root_widget)
+        new_root_layout.setContentsMargins(0, 0, 0, 0)
+        new_root_layout.setSpacing(0)
+        
+        # Upper Area (Sidebar + Content)
+        upper_area = QWidget()
+        upper_layout = QHBoxLayout(upper_area)
+        upper_layout.setContentsMargins(0, 0, 0, 0)
+        upper_layout.setSpacing(0)
+        
+        # --- Left Sidebar (Nav Rail) ---
+        sidebar_frame = QFrame()
+        sidebar_frame.setObjectName("modernSidebar")
+        sidebar_frame.setFixedWidth(80) 
+        sidebar_layout = QVBoxLayout(sidebar_frame)
+        sidebar_layout.setContentsMargins(0, 20, 0, 20)
+        sidebar_layout.setSpacing(16)
+        
+        self.workspace_btns = []
+        self.workspace_stack = QStackedWidget() # Pre-declare
+        
+        def create_ws_btn(name, icon_text, index, tooltip):
+            btn = QPushButton()
+            btn.setObjectName("sidebarBtn")
+            btn.setCheckable(True)
+            btn.setFixedSize(60, 60)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(tooltip)
+            
+            # Layout for icon + text
+            lay = QVBoxLayout(btn)
+            lay.setContentsMargins(0,0,0,0)
+            lay.setSpacing(4)
+            lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            
+            # Using Emoji/Text for now as we want clean "Proper" icons
+            # Ideally these would be SVG icons
+            icn = QLabel(icon_text)
+            icn.setStyleSheet("font-size: 24px; color: #888; background: transparent;")
+            icn.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            
+            txt = QLabel(name)
+            txt.setStyleSheet("font-size: 10px; font-weight: 600; color: #888; background: transparent;")
+            txt.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            
+            lay.addWidget(icn)
+            lay.addWidget(txt)
+            
+            # Connect
+            btn.clicked.connect(lambda: self.set_active_workspace(index))
+            
+            sidebar_layout.addWidget(btn)
+            self.workspace_btns.append((btn, icn, txt))
+            return btn
+
+        # Workspace Buttons
+        create_ws_btn("GENERAL", "🏠", 0, "General Switching & Effects")
+        create_ws_btn("STREAM", "📡", 1, "Streaming Controls")
+        create_ws_btn("RECORD", "🔴", 2, "Recording Controls")
+        
+        sidebar_layout.addStretch()
+        
+        # Settings Button at bottom
+        # create_ws_btn("SETTINGS", "⚙️", 3, "Application Settings") # Optional
+        
+        # Define Workspace Switcher
+        def set_active_workspace(index):
+            if hasattr(self, 'workspace_stack'):
+                self.workspace_stack.setCurrentIndex(index)
+
+            # Keep monitor area height consistent across all workspaces (baseline from General)
+            try:
+                if hasattr(self, '_apply_monitor_area_height_policy'):
+                    self._apply_monitor_area_height_policy()
+            except Exception:
+                pass
+            
+            # Update Styles
+            for i, (btn, icn, txt) in enumerate(self.workspace_btns):
+                if i == index:
+                    btn.setChecked(True)
+                    btn.setStyleSheet("background-color: #252525; border-left: 3px solid #007AFF;")
+                    icn.setStyleSheet("font-size: 24px; color: #EEE; background: transparent;")
+                    txt.setStyleSheet("font-size: 10px; font-weight: 600; color: #EEE; background: transparent;")
+                else:
+                    btn.setChecked(False)
+                    btn.setStyleSheet("background-color: transparent; border: none;")
+                    icn.setStyleSheet("font-size: 24px; color: #888; background: transparent;")
+                    txt.setStyleSheet("font-size: 10px; font-weight: 600; color: #888; background: transparent;")
+                    
+        self.set_active_workspace = set_active_workspace
+
+        # --- Main Content Area ---
+        # Create vertical layout for content without scrolling Preview/Program
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(12, 12, 12, 12)
+        content_layout.setSpacing(12)
+        
+        # 1. Monitors Section (Preview | Program)
+        # Wrap monitors + switcher into a single widget so we can lock its height.
+        self.monitor_area = QWidget()
+        monitor_area_layout = QVBoxLayout(self.monitor_area)
+        monitor_area_layout.setContentsMargins(0, 0, 0, 0)
+        monitor_area_layout.setSpacing(8)
+        
+        # MAKE VIDEO HEIGHT RESPONSIVE (35% of window height, with min/max constraints)
+        self._monitor_height_percentage = 0.35  # 35% of window height for videos
+        self._monitor_min_height = 200
+        self._monitor_max_height = 400
+        
+        def _update_monitor_height():
+            try:
+                # Do NOT set fixed height - use soft constraints instead
+                # Allow the layout to handle sizing with aspect ratio policy
+                pass
+            except Exception:
+                pass
+        
+        self._update_monitor_height = _update_monitor_height
+
+        def _apply_monitor_area_height_policy():
+            try:
+                if not hasattr(self, 'monitor_area') or self.monitor_area is None:
+                    return
+                # Monitor area uses heightForWidth layout policy for responsive sizing
+            except Exception:
+                pass
+
+        self._apply_monitor_area_height_policy = _apply_monitor_area_height_policy
+        self._apply_monitor_area_height_policy()
+
+        # --- FIXED MONITOR LAYOUT ---
+        # Create Preview Monitor with title
+        preview_container_frame = QFrame()
+        preview_container_frame.setObjectName("previewContainer")
+        preview_container_frame.setStyleSheet("QFrame#previewContainer { background-color: #1a1a1a; border: none; }")
+        preview_container_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        preview_container_layout = QVBoxLayout(preview_container_frame)
+        preview_container_layout.setContentsMargins(0, 0, 0, 4)  # Add 4px bottom margin for safety
+        preview_container_layout.setSpacing(6)
+        
+        preview_title = QLabel("Preview")
+        preview_title.setStyleSheet("color: #0078d4; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;")
+        preview_container_layout.addWidget(preview_title)
+        
+        preview_aspect = AspectRatioFrame()
+        preview_aspect.setObjectName("previewMonitor")
+        preview_aspect.setMinimumSize(320, 180)  # Only set minimum, let heightForWidth handle resizing
+        # DO NOT set MaximumSize - it prevents free window resizing
+        preview_aspect.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # ENABLE CLIPPING: Prevent overlays from painting outside preview frame bounds (Windows fix)
+        preview_aspect.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        preview_aspect.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        preview_aspect.setStyleSheet("QFrame#previewMonitor { overflow: hidden; border: 2px solid #0078d4; border-radius: 4px; background-color: black; }")
+        preview_layout = QVBoxLayout(preview_aspect)
+        preview_layout.setContentsMargins(2, 2, 2, 2)
+        preview_layout.setSpacing(0)
+        self.preview_video_label = QLabel("Select a source to preview")
+        self.preview_video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_video_label.setStyleSheet("background-color: black; color: rgba(255, 255, 255, 0.4); font-size: 13px; font-weight: 500;")
+        preview_layout.addWidget(self.preview_video_label, 1)
+        
+        preview_container_layout.addWidget(preview_aspect, 1)
+
+        # Create Program Monitor with title
+        program_container_frame = QFrame()
+        program_container_frame.setObjectName("programContainer")
+        program_container_frame.setStyleSheet("QFrame#programContainer { background-color: #1a1a1a; border: none; }")
+        program_container_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        program_container_layout = QVBoxLayout(program_container_frame)
+        program_container_layout.setContentsMargins(0, 0, 0, 4)  # Add 4px bottom margin for safety
+        program_container_layout.setSpacing(6)
+        
+        program_title = QLabel("Program Live")
+        program_title.setStyleSheet("color: #d13438; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;")
+        program_container_layout.addWidget(program_title)
+        
+        program_aspect = AspectRatioFrame()
+        program_aspect.setObjectName("programMonitor")
+        program_aspect.setMinimumSize(320, 180)  # Only set minimum, let heightForWidth handle resizing
+        # DO NOT set MaximumSize - it prevents free window resizing
+        program_aspect.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # ENABLE CLIPPING: Prevent overlays from painting outside program frame bounds (Windows fix)
+        program_aspect.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        program_aspect.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        program_aspect.setStyleSheet("QFrame#programMonitor { overflow: hidden; border: 2px solid #d13438; border-radius: 4px; background-color: black; }")
+        program_layout = QVBoxLayout(program_aspect)
+        program_layout.setContentsMargins(2, 2, 2, 2)
+        program_layout.setSpacing(0)
+        if hasattr(self, 'outputPreview'):
+            self.outputPreview.setParent(None)
+            # Ensure outputPreview respects the AspectRatioFrame's sizing
+            self.outputPreview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            self.outputPreview.setMinimumSize(320, 180)  # Match container minimum
+            program_layout.addWidget(self.outputPreview, 1)
+            self.outputPreview.setStyleSheet("background-color: black; border: none; border-radius: 6px;")
+            self.outputPreview.show()
+        
+        program_container_layout.addWidget(program_aspect, 1)
+
+        # --- FIXED UI LAYOUT ---
+        # Group monitors and transition bar vertically
+        # --- Create transition bar widgets first ---
+        self.lbl_switch_transition = QLabel("Transition: None")
+        self.lbl_switch_transition.setStyleSheet("color:#cfcfcf;font-weight:600;")
+
+        self.slider_switch_dur = QSlider(Qt.Orientation.Horizontal)
+        self.slider_switch_dur.setRange(100, 2000)
+        self.slider_switch_dur.setSingleStep(50)
+        self.slider_switch_dur.setPageStep(100)
         try:
-            if hasattr(self, 'horizontalLayout_allButtons'):
-                lay = self.horizontalLayout_allButtons
-                self.textOverlayMini = TextOverlayMiniBar(self)
-                # Insert before the right-side spacer (last item)
+            self.slider_switch_dur.setValue(int(getattr(self, 'transition_duration_ms', 700) or 700))
+        except Exception:
+            self.slider_switch_dur.setValue(700)
+        self.slider_switch_dur.setFixedWidth(180)
+
+        # --- Now build the monitor and transition bar layout ---
+        monitor_group_layout = QVBoxLayout()
+        monitor_group_layout.setContentsMargins(8, 8, 8, 0)
+        monitor_group_layout.setSpacing(8)
+        
+        monitors_layout = QHBoxLayout()
+        monitors_layout.setContentsMargins(0, 0, 0, 0)
+        monitors_layout.setSpacing(12)
+        monitors_layout.addWidget(preview_container_frame, 1)
+        monitors_layout.addWidget(program_container_frame, 1)
+        monitor_group_layout.addLayout(monitors_layout, 1)
+
+        switcher_bar = QFrame()
+        switcher_bar.setFixedHeight(54)
+        switcher_bar.setObjectName("switcherBar")
+        switcher_bar.setStyleSheet("QFrame#switcherBar{background-color:#1a1a1a;border:1px solid #2c2c2c;border-radius:10px;}")
+        sw_layout = QHBoxLayout(switcher_bar)
+        sw_layout.setContentsMargins(16, 8, 16, 8)
+        sw_layout.setSpacing(12)
+        monitor_group_layout.addWidget(switcher_bar, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        # Responsive: monitor group gets moderate stretch (2), lower content gets stretch (1)
+        # This creates a 2:1 ratio where monitors take 2/3 of space, workspace takes 1/3
+        content_layout.addLayout(monitor_group_layout, 2)
+        # NOTE: Do NOT add workspace_stack here - it's added later at full configuration
+        self.slider_switch_dur.setToolTip("Transition Duration (ms)")
+        self.slider_switch_dur.setStyleSheet("""
+            QSlider::groove:horizontal { height: 4px; background: #333; border-radius: 2px; }
+            QSlider::handle:horizontal { width: 14px; height: 14px; margin: -5px 0; background: #FF9500; border-radius: 7px; }
+            QSlider::sub-page:horizontal { background: #FF9500; border-radius: 2px; }
+        """)
+
+        self.lbl_switch_dur = QLabel(f"{self.slider_switch_dur.value()} ms")
+        self.lbl_switch_dur.setStyleSheet("color:#9f9f9f;")
+
+        def _on_dur_changed(v: int):
+            try:
+                self.transition_duration_ms = int(v)
+                app_config.set('ui.transition.duration_ms', int(v))
+                app_config.save_settings()
+            except Exception:
+                pass
+            try:
+                self.lbl_switch_dur.setText(f"{int(v)} ms")
+            except Exception:
+                pass
+        self.slider_switch_dur.valueChanged.connect(_on_dur_changed)
+
+        # Buttons
+        self.btn_cut = QPushButton("CUT")
+        self.btn_cut.setFixedSize(110, 36)
+        self.btn_cut.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_cut.setStyleSheet("QPushButton{background:#2b2b2b;color:#fff;border:1px solid #3a3a3a;border-radius:8px;font-weight:800;} QPushButton:hover{background:#353535;} QPushButton:pressed{background:#1f1f1f;}")
+        self.btn_cut.clicked.connect(self.cut_transition)
+
+        self.btn_auto = QPushButton("AUTO")
+        self.btn_auto.setFixedSize(110, 36)
+        self.btn_auto.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_auto.setStyleSheet("QPushButton{background:#007AFF;color:#fff;border:none;border-radius:8px;font-weight:900;} QPushButton:hover{background:#1f8bff;} QPushButton:pressed{background:#0b5ec2;}")
+        self.btn_auto.clicked.connect(self.auto_transition)
+
+        sw_layout.addWidget(self.lbl_switch_transition)
+        sw_layout.addSpacing(6)
+        sw_layout.addWidget(self.slider_switch_dur)
+        sw_layout.addWidget(self.lbl_switch_dur)
+        sw_layout.addStretch(1)
+        sw_layout.addWidget(self.btn_cut)
+        sw_layout.addWidget(self.btn_auto)
+
+        _ = None
+
+        # Add monitors directly to monitor_group_layout (not monitor_area_layout which is now unused)
+        # Note: monitor_area and monitor_area_layout are leftover from older code structure
+        # 2. Lower Control Deck using Workspace Stack
+        self.workspace_stack = QStackedWidget()
+        self.workspace_stack.setContentsMargins(0,0,0,0)
+        try:
+            # Prevent non-General pages from forcing a larger minimum height (which would shrink monitors)
+            # Allow the workspace to expand normally; monitor_area height is controlled separately.
+            self.workspace_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            self.workspace_stack.setMinimumHeight(200)  # Soft minimum for controls section
+        except Exception:
+            pass
+        
+        # Add workspace stack to content with LOW stretch factor (1) so it takes remaining space
+        content_layout.addWidget(self.workspace_stack, 1)
+        
+        # --- WORKSPACE 1: GENERAL (Standard Inputs & Effects) ---
+        general_page = QWidget()
+        general_deck = QHBoxLayout(general_page)
+        general_deck.setSpacing(8)
+        general_deck.setContentsMargins(0, 0, 0, 0)
+        
+        # [Moved Existing Logic Here]
+        
+        # --- Left Column: Inputs & Media ---
+        left_deck = QVBoxLayout()
+        left_deck.setSpacing(8)
+        
+        # Inputs Section
+        inputs_container = QFrame()
+        inputs_container.setObjectName("deckPanel")
+        inputs_layout = QVBoxLayout(inputs_container)
+        inputs_layout.setContentsMargins(8, 8, 8, 8)
+        inputs_layout.setSpacing(8)
+        
+        in_lbl = QLabel("INPUTS")
+        in_lbl.setObjectName("sectionHeader")
+        inputs_layout.addWidget(in_lbl)
+        
+        if not hasattr(self, '_visible_input_slots'):
+            try:
+                # OBS-style: start small and let user add slots via '+'
+                self._visible_input_slots = int(app_config.get('ui.inputs.visible_slots', 1) or 1)
+            except Exception:
+                self._visible_input_slots = 1
+
+        def _make_add_tile(kind: str):
+            btn = QPushButton("+")
+            btn.setFixedHeight(96)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                "QPushButton{background:#151515;color:#9a9a9a;border:1px dashed #3a3a3a;border-radius:10px;font-size:28px;font-weight:700;}"
+                "QPushButton:hover{background:#1b1b1b;border-color:#5a5a5a;color:#d0d0d0;}"
+                "QPushButton:pressed{background:#101010;}"
+            )
+            btn.setToolTip(f"Add {kind}")
+            return btn
+
+        inputs_grid = QGridLayout()
+        inputs_grid.setHorizontalSpacing(8)
+        inputs_grid.setVerticalSpacing(8)
+        inputs_grid.setContentsMargins(0, 0, 0, 0)
+        inputs_cols = 3
+
+        def _refresh_inputs_grid():
+            while inputs_grid.count():
+                item = inputs_grid.takeAt(0)
+                if item and item.widget():
+                    item.widget().setParent(None)
+
+            visible = max(1, min(3, int(getattr(self, '_visible_input_slots', 1) or 1)))
+            for i in range(1, 4):
+                w = getattr(self, f'inputDisplay{i}', None)
+                if not w:
+                    continue
+                w.setParent(inputs_container)
+                w.setStyleSheet(
+                    "QFrame{background-color:#1a1a1a;border-radius:10px;border:1px solid #333;}"
+                    "QFrame:hover{background-color:#252525;border:1px solid #555;}"
+                    "QLabel{background-color:transparent;color:#ddd;font-weight:500;}"
+                )
                 try:
-                    insert_pos = max(0, lay.count() - 1)
+                    w.setMinimumHeight(150)
+                    w.setMaximumWidth(320)  # Constrain card width to prevent horizontal stretching
                 except Exception:
-                    insert_pos = lay.count()
-                lay.insertWidget(insert_pos, self.textOverlayMini)
+                    pass
 
-                # Wire to graphics output
-                def _on_overlay_changed(d: dict):
-                    if hasattr(self, '_graphics_output') and self._graphics_output is not None:
-                        self._graphics_output.set_text_overlay(d)
-                self.textOverlayMini.overlayChanged.connect(_on_overlay_changed)
+                # Add a compact footer strip to reduce empty space (visual parity with Media tiles)
+                try:
+                    existing_footer = w.findChild(QFrame, f"inputTileFooter{i}")
+                    if existing_footer is not None:
+                        existing_footer.setParent(None)
+                        existing_footer.deleteLater()
+                except Exception:
+                    pass
+                try:
+                    if w.layout() is not None:
+                        footer = QFrame(w)
+                        footer.setObjectName(f"inputTileFooter{i}")
+                        footer.setFixedHeight(24)
+                        footer.setStyleSheet("QFrame{background:#151515;border:1px solid #2f2f2f;border-radius:8px;}")
+                        fl = QHBoxLayout(footer)
+                        fl.setContentsMargins(8, 2, 8, 2)
+                        fl.setSpacing(8)
 
-                # Apply defaults once UI is ready
-                def _emit_defaults():
+                        dot = QFrame(footer)
+                        dot.setFixedSize(8, 8)
+                        dot.setStyleSheet("background:#3a3a3a;border-radius:4px;")
+
+                        txt = QLabel("No camera")
+                        txt.setStyleSheet("color:#9f9f9f;font-size:11px;")
+
+                        fl.addWidget(dot)
+                        fl.addWidget(txt)
+                        fl.addStretch(1)
+
+                        w.layout().addWidget(footer)
+
+                        if not hasattr(self, '_input_footer_widgets'):
+                            self._input_footer_widgets = {}
+                        self._input_footer_widgets[int(i)] = {'dot': dot, 'label': txt}
+                        try:
+                            if hasattr(self, '_update_input_footer'):
+                                self._update_input_footer(int(i))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                if i <= visible:
+                    r = (i - 1) // inputs_cols
+                    c = (i - 1) % inputs_cols
+                    inputs_grid.addWidget(w, r, c)
+                    w.show()
+                else:
+                    w.hide()
+
+            if visible < 3:
+                add_btn = _make_add_tile('Input')
+                next_slot = visible + 1
+                add_btn.clicked.connect(lambda _=False, n=next_slot: self._add_input_slot(n))
+                r = visible // inputs_cols
+                c = visible % inputs_cols
+                inputs_grid.addWidget(add_btn, r, c)
+
+            # Set column stretches to 0 to prevent horizontal stretching, then add right spacer
+            for col in range(inputs_cols):
+                inputs_grid.setColumnStretch(col, 0)
+            # Add stretch at the end to push cards left
+            inputs_grid.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum), 2, inputs_cols)
+            inputs_grid.setColumnStretch(inputs_cols, 1)  # Make spacer column expand
+            # Set row stretches to prevent card overlapping when window is resized/maximized
+            for row in range(3):
+                inputs_grid.setRowStretch(row, 0)  # Cards maintain their natural height
+
+        def _add_input_slot(self_ref, slot: int):
+            try:
+                self_ref._visible_input_slots = max(int(getattr(self_ref, '_visible_input_slots', 0) or 0), int(slot))
+                app_config.set('ui.inputs.visible_slots', int(self_ref._visible_input_slots))
+                app_config.save_settings()
+            except Exception:
+                pass
+            try:
+                _refresh_inputs_grid()
+            except Exception:
+                pass
+            try:
+                self_ref.show_camera_selection_dialog(int(slot))
+            except Exception:
+                pass
+
+        self._add_input_slot = lambda slot: _add_input_slot(self, slot)
+
+        _refresh_inputs_grid()
+        inputs_layout.addLayout(inputs_grid)
+        left_deck.addWidget(inputs_container)
+        
+        # Media Section
+        media_container = QFrame()
+        media_container.setObjectName("deckPanel")
+        media_layout = QVBoxLayout(media_container)
+        media_layout.setContentsMargins(8, 8, 8, 8)
+        media_layout.setSpacing(8)
+        
+        med_lbl = QLabel("MEDIA PLAYERS")
+        med_lbl.setObjectName("sectionHeader")
+        media_layout.addWidget(med_lbl)
+        
+        if not hasattr(self, '_visible_media_slots'):
+            try:
+                # OBS-style: start small and let user add slots via '+'
+                self._visible_media_slots = int(app_config.get('ui.media.visible_slots', 1) or 1)
+            except Exception:
+                self._visible_media_slots = 1
+
+        media_grid = QGridLayout()
+        media_grid.setHorizontalSpacing(8)
+        media_grid.setVerticalSpacing(8)
+        media_grid.setContentsMargins(0, 0, 0, 0)
+        media_cols = 3
+
+        def _refresh_media_grid():
+            while media_grid.count():
+                item = media_grid.takeAt(0)
+                if item and item.widget():
+                    item.widget().setParent(None)
+
+            visible = max(1, min(3, int(getattr(self, '_visible_media_slots', 1) or 1)))
+            for i in range(1, 4):
+                w = getattr(self, f'mediaDisplay{i}', None)
+                if not w:
+                    continue
+                w.setParent(media_container)
+                w.setStyleSheet(
+                    "QFrame{background-color:#1a1a1a;border-radius:10px;border:1px solid #333;}"
+                    "QFrame:hover{background-color:#252525;border:1px solid #555;}"
+                    "QLabel{background-color:transparent;color:#ddd;font-weight:500;}"
+                )
+                try:
+                    w.setMinimumHeight(150)
+                    w.setMaximumWidth(320)  # Constrain card width to prevent horizontal stretching
+                except Exception:
+                    pass
+                if i <= visible:
+                    r = (i - 1) // media_cols
+                    c = (i - 1) % media_cols
+                    media_grid.addWidget(w, r, c)
+                    w.show()
+                else:
+                    w.hide()
+
+            if visible < 3:
+                add_btn = _make_add_tile('Media')
+                next_slot = visible + 1
+                add_btn.clicked.connect(lambda _=False, n=next_slot: self._add_media_slot(n))
+                r = visible // media_cols
+                c = visible % media_cols
+                media_grid.addWidget(add_btn, r, c)
+
+            # Set column stretches to 0 to prevent horizontal stretching, then add right spacer
+            for col in range(media_cols):
+                media_grid.setColumnStretch(col, 0)
+            # Add stretch at the end to push cards left
+            media_grid.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum), 2, media_cols)
+            media_grid.setColumnStretch(media_cols, 1)  # Make spacer column expand
+            # Set row stretches to prevent card overlapping when window is resized/maximized
+            for row in range(3):
+                media_grid.setRowStretch(row, 0)  # Cards maintain their natural height
+
+        def _add_media_slot(self_ref, slot: int):
+            try:
+                self_ref._visible_media_slots = max(int(getattr(self_ref, '_visible_media_slots', 0) or 0), int(slot))
+                app_config.set('ui.media.visible_slots', int(self_ref._visible_media_slots))
+                app_config.save_settings()
+            except Exception:
+                pass
+            try:
+                _refresh_media_grid()
+            except Exception:
+                pass
+            try:
+                self_ref.show_media_selection_dialog(int(slot))
+            except Exception:
+                pass
+
+        self._add_media_slot = lambda slot: _add_media_slot(self, slot)
+
+        _refresh_media_grid()
+        media_layout.addLayout(media_grid)
+        left_deck.addWidget(media_container)
+
+        # Move media playback controls into each Media tile (play/pause + seek)
+        # This reuses existing UI widgets to avoid breaking playback/seek logic.
+        try:
+            pb_map = {1: 'pushButton_19', 2: 'pushButton_20', 3: 'pushButton_21'}
+            sl_map = {1: 'horizontalSlider', 2: 'horizontalSlider_2', 3: 'horizontalSlider_3'}
+
+            for i in (1, 2, 3):
+                tile = getattr(self, f'mediaDisplay{i}', None)
+                if tile is None:
+                    continue
+
+                # If redesign runs multiple times, remove previously injected control strip
+                try:
+                    existing = tile.findChild(QFrame, f"mediaTileControls{i}")
+                    if existing is not None:
+                        existing.setParent(None)
+                        existing.deleteLater()
+                except Exception:
+                    pass
+
+                play_btn = getattr(self, pb_map.get(i, ''), None)
+                seek_sl = getattr(self, sl_map.get(i, ''), None)
+                if play_btn is None and seek_sl is None:
+                    continue
+
+                # Ensure tile has a layout
+                if tile.layout() is None:
+                    lay = QVBoxLayout(tile)
+                    lay.setContentsMargins(4, 2, 4, 2)
+                    lay.setSpacing(6)
+                    tile.setLayout(lay)
+
+                ctrl = QFrame(tile)
+                ctrl.setObjectName(f"mediaTileControls{i}")
+                ctrl.setFixedHeight(24)
+                ctrl.setStyleSheet(
+                    "QFrame{background:#151515;border:1px solid #2f2f2f;border-radius:8px;}"
+                )
+                h = QHBoxLayout(ctrl)
+                h.setContentsMargins(8, 2, 8, 2)
+                h.setSpacing(8)
+
+                if play_btn is not None:
+                    play_btn.setParent(ctrl)
                     try:
-                        p = self.textOverlayMini.props_ref.props
-                        init = {
-                            **p,
-                            'color': p['color'].rgba(),
-                            'stroke_color': p['stroke_color'].rgba(),
-                            'bg_color': p['bg_color'].rgba(),
-                        }
-                        _on_overlay_changed(init)
+                        play_btn.setMinimumSize(22, 22)
+                        play_btn.setMaximumSize(22, 22)
+                        play_btn.setStyleSheet("QPushButton{background:transparent;border:none;} QPushButton:hover{background:#2a2a2a;border-radius:6px;}")
                     except Exception:
                         pass
-                QTimer.singleShot(0, _emit_defaults)
+                    h.addWidget(play_btn)
+
+                if seek_sl is not None:
+                    seek_sl.setParent(ctrl)
+                    try:
+                        # match seek_media() contract (0-100)
+                        seek_sl.setRange(0, 100)
+                        seek_sl.setFixedHeight(16)
+                        seek_sl.setStyleSheet(
+                            "QSlider::groove:horizontal{height:4px;background:#333;border-radius:2px;}"
+                            "QSlider::handle:horizontal{width:12px;height:12px;margin:-4px 0;background:#007AFF;border-radius:6px;}"
+                            "QSlider::sub-page:horizontal{background:#007AFF;border-radius:2px;}"
+                        )
+                    except Exception:
+                        pass
+                    h.addWidget(seek_sl, 1)
+
+                # Append controls to bottom of the tile
+                try:
+                    tile.layout().addWidget(ctrl)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        
+        general_deck.addLayout(left_deck, 40)
+        
+        # --- Middle Column: Effects ---
+        middle_deck = QVBoxLayout()
+        effects_container = QFrame()
+        effects_container.setObjectName("deckPanel")
+        effects_layout = QVBoxLayout(effects_container)
+        effects_layout.setContentsMargins(8, 8, 8, 8)
+        effects_layout.setSpacing(8)
+        
+        eff_lbl = QLabel("EFFECTS & GRAPHICS")
+        eff_lbl.setObjectName("sectionHeader")
+        effects_layout.addWidget(eff_lbl)
+        
+        if hasattr(self, 'premiere_effects_panel'):
+            self.premiere_effects_panel.setParent(effects_container)
+            effects_layout.addWidget(self.premiere_effects_panel)
+            self.premiere_effects_panel.show()
+            if hasattr(self, 'tabWidget_effects'):
+                self.tabWidget_effects.hide()
+        elif hasattr(self, 'tabWidget_effects'):
+            self.tabWidget_effects.setParent(effects_container)
+            effects_layout.addWidget(self.tabWidget_effects)
+            self.tabWidget_effects.show()
+            
+        middle_deck.addWidget(effects_container)
+        general_deck.addLayout(middle_deck, 35)
+        
+        # --- Right Column: Transitions & Switching ---
+        right_deck = QVBoxLayout()
+        right_deck.setSpacing(8)
+        
+        # Text Overlay Settings
+        overlay_container = QFrame()
+        overlay_container.setObjectName("deckPanel")
+        overlay_layout = QVBoxLayout(overlay_container)
+        overlay_layout.setContentsMargins(8, 8, 8, 8)
+        overlay_layout.setSpacing(8)
+        
+        ov_lbl = QLabel("OVERLAY SETTINGS")
+        ov_lbl.setObjectName("sectionHeader")
+        overlay_layout.addWidget(ov_lbl)
+        
+        self.textOverlayMini = TextOverlayMiniBar(self)
+        overlay_layout.addWidget(self.textOverlayMini)
+        
+        # Wire to graphics output
+        def _on_overlay_changed(d: dict):
+            # Adapt mini overlay props to the global text overlay renderer settings
+            try:
+                from PyQt6.QtGui import QColor
+                # We keep preview/program text settings separate; do not touch Program here
+
+                def _to_qcolor_from_rgba(v):
+                    c = QColor()
+                    try:
+                        c.setRgba(int(v))
+                    except Exception:
+                        # Fallback to white/black
+                        c = QColor(255, 255, 255) if 'color' in d else QColor(0, 0, 0)
+                    return c
+
+                # Map properties
+                vis = bool(d.get('visible', True))
+                txt = str(d.get('text', '')) if vis else ''
+                font_family = str(d.get('font_family', ''))
+                try:
+                    font_size = int(d.get('font_size', 36))
+                except Exception:
+                    font_size = 36
+
+                c_text = _to_qcolor_from_rgba(d.get('color', 0xFFFFFFFF))
+                c_stroke = _to_qcolor_from_rgba(d.get('stroke_color', 0xFF000000))
+                c_bg = _to_qcolor_from_rgba(d.get('bg_color', 0x00000000))
+
+                try:
+                    stroke_w = int(d.get('stroke_width', 0))
+                except Exception:
+                    stroke_w = 0
+
+                try:
+                    pos_x = int(d.get('pos_x', 50))
+                    pos_y = int(d.get('pos_y', 90))
+                except Exception:
+                    pos_x, pos_y = 50, 90
+
+                align = str(d.get('anchor', 'center'))
+
+                bg_enabled = bool(d.get('bg_enabled', False))
+                bg_opacity = float(c_bg.alpha() / 255.0)
+
+                settings = {
+                    'text': txt,
+                    'font_family': font_family,
+                    'font_size': font_size,
+                    'text_color': c_text.name(),
+                    'stroke_color': c_stroke.name(),
+                    'stroke_width': stroke_w,
+                    'outline_enabled': stroke_w > 0,
+                    'position_x': pos_x,
+                    'position_y': pos_y,
+                    'alignment': align,
+                    'bg_enabled': bg_enabled,
+                    'bg_color': c_bg.name(),
+                    'bg_opacity': bg_opacity,
+                }
+
+                # Store for PREVIEW - position_y/alignment come from user settings, not forced
+                # Both preview and program use the same position so they match visually
+                enforced_settings = dict(settings)
+                # Do NOT force position_y or alignment - use what user configured
+                # This ensures preview and program text appear at identical positions
+                
+                # Store for preview right now
+                try:
+                    self.preview_text_settings = enforced_settings
+                    # DO NOT touch program_text_settings here
+                    # Program settings only update when CUT or AUTO is clicked
+                except Exception:
+                    pass
+                # Refresh Preview monitor immediately
+                try:
+                    pv = getattr(self, 'active_preview_source', None)
+                    if pv and isinstance(pv, tuple) and len(pv) == 2:
+                        st, idx = pv[0], int(pv[1])
+                        frame = None
+                        if st == 'input':
+                            frame = self.last_input_image.get(idx) if hasattr(self, 'last_input_image') else None
+                        elif st == 'media':
+                            frame = self.last_media_image.get(idx) if hasattr(self, 'last_media_image') else None
+                        self._update_preview_monitor(frame, st, idx)
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"Overlay mapping error: {e}")
+        self.textOverlayMini.overlayChanged.connect(_on_overlay_changed)
+        
+        # Apply defaults once UI is ready
+        def _emit_defaults():
+            try:
+                p = self.textOverlayMini.props_ref.props
+                init = {
+                    **p,
+                    'color': p['color'].rgba(),
+                    'stroke_color': p['stroke_color'].rgba(),
+                    'bg_color': p['bg_color'].rgba(),
+                }
+                _on_overlay_changed(init)
+            except Exception:
+                pass
+        QTimer.singleShot(0, _emit_defaults)
+
+        right_deck.addWidget(overlay_container, 0)
+
+        # Transitions
+        trans_container = QFrame()
+        trans_container.setObjectName("deckPanel")
+        trans_layout = QVBoxLayout(trans_container)
+        trans_layout.setContentsMargins(8, 8, 8, 8)
+        trans_layout.setSpacing(8)
+        
+        tr_lbl = QLabel("TRANSITIONS")
+        tr_lbl.setObjectName("sectionHeader")
+        trans_layout.addWidget(tr_lbl)
+        
+        if hasattr(self, 'tabWidget_transitions'):
+            self.tabWidget_transitions.setParent(trans_container)
+            trans_layout.addWidget(self.tabWidget_transitions)
+            self.tabWidget_transitions.show()
+            
+        right_deck.addWidget(trans_container, 1)
+        
+        general_deck.addLayout(right_deck, 25)
+        
+        # Wrap general_page in a scroll area for vertical scrolling of controls
+        general_scroll = QScrollArea()
+        general_scroll.setWidgetResizable(True)
+        general_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        general_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        general_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        general_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        general_scroll.setWidget(general_page)
+        
+        self.workspace_stack.addWidget(general_scroll)
+        # --- Ensure transitions panel and overlay preview are always initialized ---
+        try:
+            self.setup_transitions_panel()
         except Exception as e:
-            print(f"Error installing Text Overlay mini bar: {e}")
+            print(f"[FIX] Error forcing transitions panel: {e}")
+        try:
+            self._ensure_output_preview_label()
+        except Exception as e:
+            print(f"[FIX] Error forcing overlay preview: {e}")
+        
+        # --- WORKSPACE 2: STREAMING ---
+        streaming_page = QWidget()
+        try:
+            streaming_page.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            streaming_page.setMinimumHeight(0)
+        except Exception:
+            pass
+        streaming_page_layout = QVBoxLayout(streaming_page)
+        streaming_page_layout.setContentsMargins(0, 0, 0, 0)
+        streaming_page_layout.setSpacing(0)
+
+        streaming_scroll = QScrollArea()
+        streaming_scroll.setWidgetResizable(True)
+        streaming_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        streaming_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        try:
+            streaming_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            streaming_scroll.setMinimumHeight(0)
+        except Exception:
+            pass
+        try:
+            streaming_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        except Exception:
+            pass
+
+        streaming_inner = QWidget()
+        try:
+            streaming_inner.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            streaming_inner.setMinimumHeight(0)
+        except Exception:
+            pass
+        streaming_layout = QHBoxLayout(streaming_inner)
+        streaming_layout.setSpacing(8)
+        streaming_layout.setContentsMargins(8, 8, 8, 8)
+        
+        # We need to import the panels here or at top
+        try:
+            from streaming_settings_dialog_improved import StreamingSettingsPanel
+            
+            # Stream 1 Panel
+            s1_container = QFrame()
+            s1_container.setObjectName("deckPanel")
+            s1_layout = QVBoxLayout(s1_container)
+            s1_layout.setContentsMargins(0,0,0,0)
+            
+            # Header 1
+            h1 = QLabel("STREAM 1 (Primary)")
+            try:
+                h1.setFont(QFont('', 14, QFont.Weight.Bold))
+            except Exception:
+                pass
+            h1.setStyleSheet("color: white; padding: 8px; background-color: #333; border-top-left-radius: 8px; border-top-right-radius: 8px;")
+            h1.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            s1_layout.addWidget(h1)
+            
+            self.stream1_panel = StreamingSettingsPanel(self, 1, app_config)
+            s1_layout.addWidget(self.stream1_panel)
+
+            # Bottom status + log
+            s1_footer = QFrame()
+            s1_footer.setObjectName("streamFooter")
+            s1_footer.setStyleSheet("QFrame#streamFooter{background:#121212;border:1px solid #2a2a2a;border-radius:10px;}")
+            s1_footer_l = QVBoxLayout(s1_footer)
+            s1_footer_l.setContentsMargins(10, 8, 10, 8)
+            s1_footer_l.setSpacing(8)
+
+            s1_row = QHBoxLayout()
+            s1_row.setContentsMargins(0, 0, 0, 0)
+            s1_row.setSpacing(10)
+
+            pill_base = "QLabel{background:#1a1a1a;border:1px solid #2f2f2f;border-radius:8px;padding:4px 8px;font-size:11px;font-weight:700;color:#cfcfcf;}"
+            s1_dot = QFrame()
+            s1_dot.setFixedSize(10, 10)
+            s1_dot.setStyleSheet("background:#3a3a3a;border-radius:5px;")
+            s1_status = QLabel("READY")
+            s1_status.setStyleSheet(pill_base)
+            s1_uptime = QLabel("Uptime 00:00:00")
+            s1_uptime.setStyleSheet(pill_base)
+            s1_bitrate = QLabel("Bitrate — kbps")
+            s1_bitrate.setStyleSheet(pill_base)
+
+            s1_row.addWidget(s1_dot)
+            s1_row.addWidget(s1_status)
+            s1_row.addStretch(1)
+            s1_row.addWidget(s1_uptime)
+            s1_row.addWidget(s1_bitrate)
+
+            s1_log = QTextEdit()
+            s1_log.setReadOnly(True)
+            s1_log.setFixedHeight(58)
+            s1_log.setStyleSheet("QTextEdit{background:#0b0b0b;border:1px solid #232323;border-radius:8px;color:#cfcfcf;padding:6px;font-size:11px;}")
+
+            s1_footer_l.addLayout(s1_row)
+            s1_footer_l.addWidget(s1_log)
+            s1_layout.addWidget(s1_footer)
+
+            streaming_layout.addWidget(s1_container)
+            
+            # Stream 2 Panel
+            s2_container = QFrame()
+            s2_container.setObjectName("deckPanel")
+            s2_layout = QVBoxLayout(s2_container)
+            s2_layout.setContentsMargins(0,0,0,0)
+            
+            # Header 2
+            h2 = QLabel("STREAM 2 (Secondary / Backup)")
+            try:
+                h2.setFont(QFont('', 14, QFont.Weight.Bold))
+            except Exception:
+                pass
+            h2.setStyleSheet("color: white; padding: 8px; background-color: #333; border-top-left-radius: 8px; border-top-right-radius: 8px;")
+            h2.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            s2_layout.addWidget(h2)
+            
+            self.stream2_panel = StreamingSettingsPanel(self, 2, app_config)
+            s2_layout.addWidget(self.stream2_panel)
+
+            # Bottom status + log
+            s2_footer = QFrame()
+            s2_footer.setObjectName("streamFooter")
+            s2_footer.setStyleSheet("QFrame#streamFooter{background:#121212;border:1px solid #2a2a2a;border-radius:10px;}")
+            s2_footer_l = QVBoxLayout(s2_footer)
+            s2_footer_l.setContentsMargins(10, 8, 10, 8)
+            s2_footer_l.setSpacing(8)
+
+            s2_row = QHBoxLayout()
+            s2_row.setContentsMargins(0, 0, 0, 0)
+            s2_row.setSpacing(10)
+
+            pill_base = "QLabel{background:#1a1a1a;border:1px solid #2f2f2f;border-radius:8px;padding:4px 8px;font-size:11px;font-weight:700;color:#cfcfcf;}"
+            s2_dot = QFrame()
+            s2_dot.setFixedSize(10, 10)
+            s2_dot.setStyleSheet("background:#3a3a3a;border-radius:5px;")
+            s2_status = QLabel("READY")
+            s2_status.setStyleSheet(pill_base)
+            s2_uptime = QLabel("Uptime 00:00:00")
+            s2_uptime.setStyleSheet(pill_base)
+            s2_bitrate = QLabel("Bitrate — kbps")
+            s2_bitrate.setStyleSheet(pill_base)
+
+            s2_row.addWidget(s2_dot)
+            s2_row.addWidget(s2_status)
+            s2_row.addStretch(1)
+            s2_row.addWidget(s2_uptime)
+            s2_row.addWidget(s2_bitrate)
+
+            s2_log = QTextEdit()
+            s2_log.setReadOnly(True)
+            s2_log.setFixedHeight(58)
+            s2_log.setStyleSheet("QTextEdit{background:#0b0b0b;border:1px solid #232323;border-radius:8px;color:#cfcfcf;padding:6px;font-size:11px;}")
+
+            s2_footer_l.addLayout(s2_row)
+            s2_footer_l.addWidget(s2_log)
+            s2_layout.addWidget(s2_footer)
+
+            streaming_layout.addWidget(s2_container)
+
+            # Keep refs for updates
+            if not hasattr(self, '_stream_ui'):
+                self._stream_ui = {}
+            self._stream_ui[1] = {'dot': s1_dot, 'status': s1_status, 'uptime': s1_uptime, 'bitrate': s1_bitrate, 'log': s1_log}
+            self._stream_ui[2] = {'dot': s2_dot, 'status': s2_status, 'uptime': s2_uptime, 'bitrate': s2_bitrate, 'log': s2_log}
+
+            if not hasattr(self, '_stream_started_at'):
+                self._stream_started_at = {}
+            if not hasattr(self, '_stream_last_status'):
+                self._stream_last_status = {}
+
+            def _update_stream_footer(stream_id: int, status_text: str):
+                try:
+                    ui = getattr(self, '_stream_ui', {}).get(int(stream_id))
+                    if not isinstance(ui, dict):
+                        return
+                    stl = (status_text or '').lower()
+
+                    dot = ui.get('dot')
+                    lbl = ui.get('status')
+                    log = ui.get('log')
+
+                    if 'started' in stl or 'streaming' in stl:
+                        if dot is not None:
+                            dot.setStyleSheet("background:#35C759;border-radius:5px;")
+                        if lbl is not None:
+                            lbl.setText("LIVE")
+                            lbl.setStyleSheet("QLabel{background:rgba(53,199,89,0.10);border:1px solid rgba(53,199,89,0.35);border-radius:8px;padding:4px 8px;font-size:11px;font-weight:900;color:#35C759;}")
+                        if int(stream_id) not in self._stream_started_at:
+                            import time
+                            self._stream_started_at[int(stream_id)] = float(time.time())
+                    elif 'reconnecting' in stl:
+                        if dot is not None:
+                            dot.setStyleSheet("background:#FF9500;border-radius:5px;")
+                        if lbl is not None:
+                            lbl.setText("RECONNECT")
+                            lbl.setStyleSheet("QLabel{background:rgba(255,149,0,0.10);border:1px solid rgba(255,149,0,0.35);border-radius:8px;padding:4px 8px;font-size:11px;font-weight:900;color:#FF9500;}")
+                    elif 'error' in stl:
+                        if dot is not None:
+                            dot.setStyleSheet("background:#FF3B30;border-radius:5px;")
+                        if lbl is not None:
+                            lbl.setText("ERROR")
+                            lbl.setStyleSheet("QLabel{background:rgba(255,59,48,0.10);border:1px solid rgba(255,59,48,0.35);border-radius:8px;padding:4px 8px;font-size:11px;font-weight:900;color:#FF3B30;}")
+                        try:
+                            self._stream_started_at.pop(int(stream_id), None)
+                        except Exception:
+                            pass
+                    else:
+                        if dot is not None:
+                            dot.setStyleSheet("background:#3a3a3a;border-radius:5px;")
+                        if lbl is not None:
+                            lbl.setText("READY")
+                            lbl.setStyleSheet("QLabel{background:#1a1a1a;border:1px solid #2f2f2f;border-radius:8px;padding:4px 8px;font-size:11px;font-weight:700;color:#cfcfcf;}")
+                        try:
+                            self._stream_started_at.pop(int(stream_id), None)
+                        except Exception:
+                            pass
+
+                    try:
+                        self._stream_last_status[int(stream_id)] = str(status_text or '')
+                    except Exception:
+                        pass
+
+                    if log is not None and status_text:
+                        try:
+                            log.append(status_text)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                    pass
+            self._update_stream_footer = _update_stream_footer
+
+            def _tick_stream_uptime():
+                try:
+                    import time
+                    now = float(time.time())
+                    for sid, ui in getattr(self, '_stream_ui', {}).items():
+                        up_lbl = ui.get('uptime') if isinstance(ui, dict) else None
+                        started = getattr(self, '_stream_started_at', {}).get(int(sid))
+                        if up_lbl is None:
+                            continue
+                        if not started:
+                            up_lbl.setText("Uptime 00:00:00")
+                            continue
+                        secs = max(0, int(now - float(started)))
+                        hh = secs // 3600
+                        mm = (secs % 3600) // 60
+                        ss = secs % 60
+                        up_lbl.setText(f"Uptime {hh:02d}:{mm:02d}:{ss:02d}")
+                except Exception:
+                    pass
+
+            if not hasattr(self, '_stream_uptime_timer'):
+                self._stream_uptime_timer = QTimer(self)
+                self._stream_uptime_timer.setInterval(1000)
+                self._stream_uptime_timer.timeout.connect(_tick_stream_uptime)
+                self._stream_uptime_timer.start()
+            
+        except Exception as e:
+            print(f"Error loading streaming panels: {e}")
+            lbl = QLabel(f"Error loading streaming interface: {e}")
+            streaming_layout.addWidget(lbl)
+        
+        streaming_scroll.setWidget(streaming_inner)
+        streaming_page_layout.addWidget(streaming_scroll)
+        self.workspace_stack.addWidget(streaming_page)
+        
+        # --- WORKSPACE 3: RECORDING ---
+        recording_page = QWidget()
+        try:
+            recording_page.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            recording_page.setMinimumHeight(0)
+        except Exception:
+            pass
+        recording_page_layout = QVBoxLayout(recording_page)
+        recording_page_layout.setContentsMargins(0, 0, 0, 0)
+        recording_page_layout.setSpacing(0)
+
+        recording_scroll = QScrollArea()
+        recording_scroll.setWidgetResizable(True)
+        recording_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        recording_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        try:
+            recording_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            recording_scroll.setMinimumHeight(0)
+        except Exception:
+            pass
+        try:
+            recording_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        except Exception:
+            pass
+
+        recording_inner = QWidget()
+        try:
+            recording_inner.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            recording_inner.setMinimumHeight(0)
+        except Exception:
+            pass
+        recording_layout = QVBoxLayout(recording_inner)
+        recording_layout.setContentsMargins(8, 8, 8, 8)
+        recording_layout.setSpacing(8)
+        
+        rec_panel_frame = QFrame()
+        rec_panel_frame.setObjectName("deckPanel")
+        rec_lay = QVBoxLayout(rec_panel_frame)
+        rec_lay.setContentsMargins(0,0,0,0)
+        
+        rec_head = QLabel("RECORDING MASTER CONTROL")
+        try:
+            rec_head.setFont(QFont('', 16, QFont.Weight.Bold))
+        except Exception:
+            pass
+        rec_head.setStyleSheet("color: white; padding: 10px; background-color: #333; border-top-left-radius: 8px; border-top-right-radius: 8px;")
+        rec_head.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        rec_lay.addWidget(rec_head)
+        
+        try:
+            from recording_settings_dialog import RecordingSettingsPanel
+            
+            # Get initial values
+            initial_path = app_config.get('recording.output_path', '') or ''
+            include_audio = bool(app_config.get('recording.audio_enabled', True))
+            initial_audio_device = app_config.get('recording.audio_device', '') or ''
+            
+            self.recording_panel = RecordingSettingsPanel(self, initial_path=initial_path, include_audio=include_audio, initial_audio_device=initial_audio_device)
+            
+            # Add a customized "Start Recording" button inside the workspace since the panel is just settings
+            # We can overlay it or add it to the layout.
+            # Actually, let's keep the panel for settings and add a big Record button below it.
+            
+            rec_content = QVBoxLayout()
+            rec_content.setContentsMargins(12, 12, 12, 12)
+            rec_content.addWidget(self.recording_panel)
+            
+            # Big Record Button
+            self.record_action_btn = QPushButton("START RECORDING")
+            self.record_action_btn.setMinimumHeight(60)
+            self.record_action_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.record_action_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #ff3b30;
+                    color: white;
+                    font-size: 18px;
+                    font-weight: bold;
+                    border-radius: 8px;
+                    border: 2px solid #ff5b50;
+                }
+                QPushButton:hover {
+                    background-color: #ff5b50;
+                }
+                QPushButton:checked {
+                    background-color: #d32f2f;
+                    border-color: #b71c1c;
+                }
+            """)
+            self.record_action_btn.setCheckable(True)
+            self.record_action_btn.toggled.connect(self._on_record_toggled_workspace)
+            
+            rec_content.addSpacing(20)
+            rec_content.addWidget(self.record_action_btn)
+            rec_content.addStretch()
+            
+            rec_lay.addLayout(rec_content)
+            
+        except Exception as e:
+            print(f"Error loading recording panel: {e}")
+            rec_lay.addWidget(QLabel(f"Error: {e}"))
+            
+        recording_layout.addWidget(rec_panel_frame)
+        recording_scroll.setWidget(recording_inner)
+        recording_page_layout.addWidget(recording_scroll)
+        self.workspace_stack.addWidget(recording_page)
+
+        # Initialize
+        self.set_active_workspace(0)
+
+        # Capture baseline monitor area height from General after first layout pass
+        def _capture_monitor_area_baseline():
+            try:
+                if hasattr(self, 'monitor_area') and self.monitor_area is not None:
+                    h = int(self.monitor_area.sizeHint().height() or self.monitor_area.height() or 0)
+                    if h > 0:
+                        self._monitor_area_baseline_h = int(h)
+                        self._apply_monitor_area_height_policy()
+            except Exception:
+                pass
+        QTimer.singleShot(0, _capture_monitor_area_baseline)
+        
+        lower_deck = self.workspace_stack # For compatibility
+        # workspace_stack already added to content_layout above with proper stretch factor
+        
+        # --- Tally Light Styling ---
+        self.setStyleSheet(self.styleSheet() + """
+            QFrame[tally="program"] {
+                border: 2px solid #FF3B30 !important;
+                background-color: #2A1A1A;
+            }
+            QFrame[tally="preview"] {
+                border: 2px solid #007AFF !important;
+                background-color: #1A202A;
+            }
+            /* Input / Media Cards */
+            QFrame#deckPanel {
+                background-color: #1e1e1e;
+                border: 1px solid #333;
+                border-radius: 8px;
+            }
+            /* Hide Redundant Tab Bar ONLY in Transitions (don't affect Stream/Recording tabs) */
+            QTabWidget#tabWidget_transitions::pane { border: none; }
+            QTabWidget#tabWidget_transitions QTabBar::tab { height: 0px; margin: 0; padding: 0; border: none; }
+        """)
+
+        # Assemble Final Layout
+        # content_widget contains monitors_layout and workspace_stack
+        
+        upper_layout.addWidget(sidebar_frame)
+        upper_layout.addWidget(content_widget)  # Add content directly without scrolling
+        
+        new_root_layout.addWidget(upper_area)
+        
+        # --- Status Bar ---
+        status_bar = QFrame()
+        status_bar.setObjectName("statusBar")
+        status_bar.setFixedHeight(24)
+        status_layout = QHBoxLayout(status_bar)
+        status_layout.setContentsMargins(10, 0, 10, 0)
+        status_layout.setSpacing(20)
+        
+        def add_status_item(label, value_id):
+            container = QWidget()
+            hbox = QHBoxLayout(container)
+            hbox.setContentsMargins(0,0,0,0)
+            hbox.setSpacing(6)
+            
+            lbl = QLabel(label)
+            lbl.setObjectName("statusLabel")
+            val = QLabel("---")
+            val.setObjectName("statusValue")
+            setattr(self, value_id, val)
+            
+            hbox.addWidget(lbl)
+            hbox.addWidget(val)
+            status_layout.addWidget(container)
+            
+        add_status_item("CPU:", "status_cpu")
+        add_status_item("RAM:", "status_ram")
+        add_status_item("FPS:", "status_fps")
+        add_status_item("REC:", "status_rec")
+        add_status_item("STREAM:", "status_stream")
+        
+        status_layout.addStretch()
+        
+        self.clock_label = QLabel("00:00:00")
+        self.clock_label.setObjectName("statusValue")
+        status_layout.addWidget(self.clock_label)
+        
+        new_root_layout.addWidget(status_bar)
+        
+        # Set Central Widget
+        self.setCentralWidget(new_root_widget)
+        
+        # Start Status Timer
+        self.status_timer = QTimer()
+        self.status_timer.timeout.connect(self._update_status_bar)
+        self.status_timer.start(1000)
+        
+        # --- Initialize State for Switching ---
+        # Preview-first workflow: Program stays empty until user presses CUT/AUTO
+        if not hasattr(self, 'active_program_source'):
+            self.active_program_source = None  # No source on Program until CUT
+        if not hasattr(self, 'active_preview_source'):
+            self.active_preview_source = ('input', 1)  # Default Preview to Input 1
+        # Keep current_output in sync (Program = what's live; None = black until CUT)
+        if not hasattr(self, 'current_output') or getattr(self, '_preview_first_init', True):
+            self.current_output = None
+            self._preview_first_init = False
+            
+        # Make Inputs Clickable
+        for i in range(1, 4):
+            w = getattr(self, f'inputDisplay{i}', None)
+            if w:
+                # We need to capture 'i' in the lambda
+                # Use a transparent button overlay or event filter. 
+                # Simplest: override mousePressEvent dynamically
+                def make_callback(idx):
+                    return lambda event: self.set_preview_source('input', idx)
+                w.mousePressEvent = make_callback(i)
+                w.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        # Make Media Clickable
+        for i in range(1, 4):
+            w = getattr(self, f'mediaDisplay{i}', None)
+            if w:
+                def make_callback(idx):
+                    return lambda event: self.set_preview_source('media', idx)
+                w.mousePressEvent = make_callback(i)
+                w.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        # Initial Tally Update
+        self.update_tally_lights()
+        
+        print("✅ Premium Redesign Applied Successfully")
+
+    def _unlock_video_dominance(self):
+        """
+        Override minimum height constraints to allow video section to dominate.
+        This is called after apply_modern_redesign() to forcefully unlock the bottom section.
+        """
+        try:
+            # 1. UNLOCK BOTTOM SECTION: Remove minimumHeight from workspace_stack and its children
+            if hasattr(self, 'workspace_stack'):
+                self.workspace_stack.setMinimumHeight(0)
+                print("[VIDEO DOMINANCE] workspace_stack minimumHeight unlocked → 0")
+                
+                # Recursively unlock all child widgets in workspace_stack
+                def unlock_children(widget):
+                    try:
+                        widget.setMinimumHeight(0)
+                        for child in widget.findChildren(QWidget):
+                            try:
+                                child.setMinimumHeight(0)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                
+                unlock_children(self.workspace_stack)
+            
+            # 2. UNLOCK SPECIFIC FRAMES: Remove constraints from Inputs, Effects, Media, etc.
+            for widget_name in ['inputsFrame', 'effectsFrame', 'mediaFrame', 'deckPanel', 'generalPage', 'streamPage', 'recordPage']:
+                try:
+                    w = getattr(self, widget_name, None)
+                    if w is not None:
+                        w.setMinimumHeight(0)
+                        print(f"[VIDEO DOMINANCE] {widget_name} minimumHeight unlocked → 0")
+                except Exception:
+                    pass
+            
+            # 3. FORCE TOP EXPANSION: Set monitor_area to expand in both directions
+            if hasattr(self, 'monitor_area'):
+                # Set size policy to Expanding/Expanding so it grows to fill available space
+                size_policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+                self.monitor_area.setSizePolicy(size_policy)
+                print("[VIDEO DOMINANCE] monitor_area size policy set to Expanding/Expanding")
+                
+                # Ensure no maximum height constraint
+                self.monitor_area.setMaximumHeight(16777215)  # Qt's max value
+            
+            # 4. RE-APPLY STRETCH: Get parent layout and re-enforce stretch factors
+            if hasattr(self, 'monitor_area') and self.monitor_area.parent() is not None:
+                parent_layout = self.monitor_area.parent().layout()
+                if parent_layout is not None:
+                    # Find indices of monitor_area and workspace_stack in the layout
+                    monitor_idx = None
+                    workspace_idx = None
+                    
+                    for i in range(parent_layout.count()):
+                        item = parent_layout.itemAt(i)
+                        if item and item.widget() == self.monitor_area:
+                            monitor_idx = i
+                        elif item and item.widget() == getattr(self, 'workspace_stack', None):
+                            workspace_idx = i
+                    
+                    # Re-apply stretch: 3:1 ratio (video:controls)
+                    if monitor_idx is not None:
+                        parent_layout.setStretch(monitor_idx, 3)
+                        print(f"[VIDEO DOMINANCE] monitor_area stretch factor set to 3 at index {monitor_idx}")
+                    
+                    if workspace_idx is not None:
+                        parent_layout.setStretch(workspace_idx, 1)
+                        print(f"[VIDEO DOMINANCE] workspace_stack stretch factor set to 1 at index {workspace_idx}")
+            
+            # 5. FORCE LAYOUT UPDATE
+            self.update()
+            self.repaint()
+            print("[VIDEO DOMINANCE] Layout forcefully updated and repainted")
+            
+        except Exception as e:
+            print(f"[VIDEO DOMINANCE ERROR] Failed to unlock video dominance: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def set_preview_source(self, source_type, index):
+        """Set the preview source and update UI."""
+        self.active_preview_source = (source_type, index)
+        self.update_tally_lights()
+        
+        try:
+            img = None
+            if source_type == 'input':
+                img = self.last_input_image.get(index) if hasattr(self, 'last_input_image') else None
+            elif source_type == 'media':
+                img = self.last_media_image.get(index) if hasattr(self, 'last_media_image') else None
+            self._update_preview_monitor(img, source_type, index)
+        except Exception:
+            pass
+
+    def _detect_overlay_opening(self, effect_path: str, overlay_img: QImage):
+        """Detect opening area in overlay using the same methods as enhanced_graphics_output.py"""
+        import json
+        try:
+            # Method 1: Try JSON sidecar file
+            base, _ = os.path.splitext(effect_path)
+            json_path = base + '.json'
+            if os.path.exists(json_path):
+                try:
+                    with open(json_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    opening = data.get('opening') if isinstance(data, dict) else None
+                    if isinstance(opening, (list, tuple)) and len(opening) == 4:
+                        nx, ny, nw, nh = [float(v) for v in opening]
+                        return (
+                            max(0.0, min(1.0, nx)),
+                            max(0.0, min(1.0, ny)),
+                            max(0.01, min(1.0, nw)),
+                            max(0.01, min(1.0, nh))
+                        )
+                except Exception:
+                    pass
+            
+            # Method 2: Try mask file
+            mask_path = base + '_mask.png'
+            if os.path.exists(mask_path):
+                try:
+                    mask_img = QImage(mask_path)
+                    if not mask_img.isNull():
+                        w, h = mask_img.width(), mask_img.height()
+                        min_x = min_y = float('inf')
+                        max_x = max_y = -1
+                        
+                        for y in range(h):
+                            for x in range(w):
+                                c = mask_img.pixelColor(x, y)
+                                if c.red() > 200 and c.green() > 200 and c.blue() > 200 and c.alpha() > 200:
+                                    min_x = min(min_x, x)
+                                    min_y = min(min_y, y)
+                                    max_x = max(max_x, x)
+                                    max_y = max(max_y, y)
+                        
+                        if max_x > min_x and max_y > min_y:
+                            return (min_x / w, min_y / h, (max_x - min_x + 1) / w, (max_y - min_y + 1) / h)
+                except Exception:
+                    pass
+            
+            # Method 3: Auto-detect from transparency
+            if overlay_img and not overlay_img.isNull():
+                try:
+                    w, h = overlay_img.width(), overlay_img.height()
+                    if w > 10 and h > 10:
+                        min_x = min_y = float('inf')
+                        max_x = max_y = -1
+                        
+                        for y in range(h):
+                            for x in range(w):
+                                # Be more tolerant: consider semi-transparent pixels as opening too
+                                # This helps effects whose window uses soft edges or partial transparency
+                                if overlay_img.pixelColor(x, y).alpha() <= 64:
+                                    min_x = min(min_x, x)
+                                    min_y = min(min_y, y)
+                                    max_x = max(max_x, x)
+                                    max_y = max(max_y, y)
+                        
+                        if max_x > min_x and max_y > min_y:
+                            return (min_x / w, min_y / h, (max_x - min_x + 1) / w, (max_y - min_y + 1) / h)
+                except Exception:
+                    pass
+            
+            return None
+        except Exception:
+            return None
+
+    def _update_preview_monitor(self, img: QImage | None, source_type: str, index: int):
+        try:
+            # Debug logging removed for performance - was running on every frame
+            # Uncomment below for debugging if needed
+            # img_status = "None" if img is None else ("Null" if (hasattr(img, 'isNull') and img.isNull()) else f"{img.width()}x{img.height()}")
+            # overlay_status = "Yes" if getattr(self, 'preview_overlay_path', None) else "No"
+            # if not hasattr(self, '_preview_update_count'):
+            #     self._preview_update_count = 0
+            # self._preview_update_count += 1
+            # if self._preview_update_count % 30 == 1:
+            #     print(f"📺 Preview update #{self._preview_update_count}: {source_type}-{index}, img={img_status}, overlay={overlay_status}")
+            
+            if not hasattr(self, 'preview_video_label') or self.preview_video_label is None:
+                return
+            if img is None or (hasattr(img, 'isNull') and img.isNull()):
+                self.preview_video_label.setPixmap(QPixmap())
+                if source_type == 'input':
+                    self.preview_video_label.setText(f"Input {index}")
+                elif source_type == 'media':
+                    self.preview_video_label.setText(f"Media {index}")
+                else:
+                    self.preview_video_label.setText("Select a source to preview")
+                return
+            preview_size = self.preview_video_label.size()
+            if preview_size.width() <= 1 or preview_size.height() <= 1:
+                ms = self.preview_video_label.minimumSize()
+                preview_size = ms if ms.isValid() else QSize(640, 360)
+            # Apply preview-only effect (does not affect LIVE/stream/record)
+            # Use the EXACT same logic as enhanced_graphics_output.py for consistent rendering
+            # OPTIMIZED: Cache scaled overlays, masks, and geometry to reduce CPU usage
+            # ULTRA-OPTIMIZED: Frame skipping and quality reduction for low-end systems (i3 laptops)
+            try:
+                from PyQt6.QtGui import QPainter
+                from PyQt6.QtCore import QRectF
+                import json
+                
+                pfx = getattr(self, 'preview_overlay_path', None)
+                if pfx and os.path.exists(str(pfx)):
+                    # OPTIMIZATION: Frame skipping for low-end systems
+                    # Only process overlay every Nth frame to reduce CPU load
+                    if not hasattr(self, '_preview_frame_skip_counter'):
+                        self._preview_frame_skip_counter = 0
+                        self._preview_last_composed = None
+                    
+                    self._preview_frame_skip_counter += 1
+                    
+                    # Skip every other frame when overlay is active (50% reduction)
+                    # On i3 laptops, this makes a huge difference
+                    # But if a new effect was just selected, force compose for a couple frames
+                    if hasattr(self, '_preview_compose_force') and isinstance(self._preview_compose_force, int) and self._preview_compose_force > 0:
+                        self._preview_compose_force -= 1
+                    elif self._preview_frame_skip_counter % 2 != 0 and self._preview_last_composed is not None:
+                        # Reuse last composed frame
+                        img = self._preview_last_composed
+                    else:
+                        # Load and cache the overlay image (only when it changes)
+                        if not hasattr(self, '_preview_overlay_cache_path') or self._preview_overlay_cache_path != pfx:
+                            self._preview_overlay_image = QImage(str(pfx))
+                            self._preview_overlay_cache_path = pfx
+                            # Detect opening area using the same methods as enhanced_graphics_output.py
+                            self._preview_opening_norm = self._detect_overlay_opening(str(pfx), self._preview_overlay_image)
+                            # Clear cached scaled overlays and masks when overlay changes
+                            self._preview_scaled_overlay_cache = {}
+                            self._preview_mask_cache = {}
+                            self._preview_geom_cache = {}
+                        
+                        overlay_img = self._preview_overlay_image
+                        opening_norm = self._preview_opening_norm
+                        
+                        if overlay_img and not overlay_img.isNull():
+                            # Calculate overlay geometry (aspect-fit into preview_size)
+                            # OPTIMIZATION: Cache geometry calculation
+                            cache_key = (preview_size.width(), preview_size.height())
+                            
+                            if not hasattr(self, '_preview_geom_cache'):
+                                self._preview_geom_cache = {}
+                            
+                            geom = self._preview_geom_cache.get(cache_key)
+                            if geom is None:
+                                src_w = overlay_img.width()
+                                src_h = overlay_img.height()
+                                dst_w = preview_size.width()
+                                dst_h = preview_size.height()
+                                scale = min(dst_w / src_w, dst_h / src_h)
+                                scaled_w = int(src_w * scale)
+                                scaled_h = int(src_h * scale)
+                                off_x = (dst_w - scaled_w) // 2
+                                off_y = (dst_h - scaled_h) // 2
+                                geom = (scaled_w, scaled_h, off_x, off_y)
+                                self._preview_geom_cache[cache_key] = geom
+                            
+                            scaled_w, scaled_h, off_x, off_y = geom
+                            
+                            # OPTIMIZATION: Cache scaled overlay
+                            if not hasattr(self, '_preview_scaled_overlay_cache'):
+                                self._preview_scaled_overlay_cache = {}
+                            
+                            scaled_overlay = self._preview_scaled_overlay_cache.get(cache_key)
+                            if scaled_overlay is None:
+                                # OPTIMIZATION: Use FastTransformation for i3 laptops (much faster than SmoothTransformation)
+                                scaled_overlay = overlay_img.scaled(
+                                    QSize(scaled_w, scaled_h),
+                                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                                    Qt.TransformationMode.FastTransformation  # Changed from SmoothTransformation
+                                )
+                                self._preview_scaled_overlay_cache[cache_key] = scaled_overlay
+                            
+                            # Create canvas
+                            canvas = QImage(preview_size, QImage.Format.Format_ARGB32)
+                            canvas.fill(QColor(0, 0, 0, 255))
+                            
+                            painter = QPainter(canvas)
+                            try:
+                                # OPTIMIZATION: Disable antialiasing for i3 laptops (faster rendering)
+                                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+                                painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+                                
+                                # 1. Draw video in the opening area (or full-screen if no opening detected)
+                                if img and not img.isNull():
+                                    if opening_norm:
+                                        # Draw video inside the detected opening
+                                        nx, ny, nw, nh = opening_norm
+                                        video_rect = QRectF(
+                                            off_x + (nx * scaled_w),
+                                            off_y + (ny * scaled_h),
+                                            max(1.0, nw * scaled_w),
+                                            max(1.0, nh * scaled_h)
+                                        )
+                                    else:
+                                        # No opening detected, draw full-screen
+                                        video_rect = QRectF(0, 0, preview_size.width(), preview_size.height())
+                                    
+                                    # Draw video scaled to fit the target rect
+                                    painter.drawImage(video_rect, img, QRectF(img.rect()))
+                                    
+                                    # Apply mask if opening is detected
+                                    if opening_norm:
+                                        # OPTIMIZATION: Cache mask
+                                        if not hasattr(self, '_preview_mask_cache'):
+                                            self._preview_mask_cache = {}
+                                        
+                                        mask = self._preview_mask_cache.get(cache_key)
+                                        if mask is None:
+                                            # Create mask for the opening area
+                                            mask = QImage(preview_size, QImage.Format.Format_ARGB32)
+                                            mask.fill(QColor(0, 0, 0, 0))
+                                            mask_painter = QPainter(mask)
+                                            mask_painter.fillRect(
+                                                int(video_rect.x()),
+                                                int(video_rect.y()),
+                                                int(video_rect.width()),
+                                                int(video_rect.height()),
+                                                QColor(255, 255, 255, 255)
+                                            )
+                                            mask_painter.end()
+                                            self._preview_mask_cache[cache_key] = mask
+                                        
+                                        # Apply mask to clip video to opening
+                                        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+                                        painter.drawImage(0, 0, mask)
+                                        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+                                
+                                # 2. Draw cached scaled overlay on top
+                                painter.drawImage(off_x, off_y, scaled_overlay)
+                                
+                            finally:
+                                painter.end()
+                            
+                            # Cache the composed result for frame skipping
+                            self._preview_last_composed = canvas.copy()
+                            img = canvas
+            except Exception as e:
+                print(f"❌ Preview overlay error: {e}")
+                import traceback
+                traceback.print_exc()
+
+            # Apply Preview-only text overlay to the preview image before displaying
+            # Use ENFORCED position settings (already set to bottom in _on_overlay_changed)
+            try:
+                if hasattr(self, 'preview_text_settings') and isinstance(self.preview_text_settings, dict):
+                    s = dict(self.preview_text_settings)  # Use enforced settings
+                    if s.get('text', '').strip():
+                        from text_overlay_renderer import TextOverlayRenderer
+                        if not hasattr(self, '_preview_text_renderer') or self._preview_text_renderer is None:
+                            self._preview_text_renderer = TextOverlayRenderer()
+                        # Position is already enforced in preview_text_settings, just use it
+                        self._preview_text_renderer.update_settings(s)
+                        img = self._preview_text_renderer.render_overlay(img)
+            except Exception as e:
+                print(f"[Preview Text] Error: {e}")
+
+            pix = QPixmap.fromImage(img)
+            # Avoid double scaling: if we already composed at preview_size, use it directly.
+            try:
+                if img.size() == preview_size:
+                    preview_pix = pix
+                else:
+                    try:
+                        preview_pix = pix.scaled(preview_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                    except:
+                        # Fallback to fast transformation if smooth fails
+                        preview_pix = pix.scaled(preview_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
+            except Exception as e:
+                # If scaling fails, show original
+                preview_pix = pix
+            self.preview_video_label.setPixmap(preview_pix)
+            self.preview_video_label.setText("")
+
+            # Ensure preview audio is never output: mute preview media players
+            try:
+                if source_type == 'media' and hasattr(self, 'media_players'):
+                    player = self.media_players.get(int(index))
+                    if player is not None:
+                        # Keep preview muted at all times
+                        try:
+                            if hasattr(player, 'audioOutput') and player.audioOutput():
+                                player.audioOutput().setVolume(0.0)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        except Exception:
+            pass
+            
+    def set_program_source(self, source_type, index):
+        print(f"[DEBUG] set_program_source called with source_type={source_type}, index={index}", flush=True)
+        """Set the program source (Live) and update UI."""
+        # Auto-play local media when previewed (if not live)
+        if source_type == 'media':
+            try:
+                player = self.media_players.get(index)
+                if player and player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+                    # Only auto-play if not the current Program source (to avoid restart overlaps)
+                    if self.active_program_source != ('media', index):
+                        print(f"Auto-playing Media {index} for Preview")
+                        player.play()
+                        if hasattr(self, 'btn_prev_play'):
+                            self.btn_prev_play.setIcon(self.get_icon("Pause.png"))
+            except Exception:
+                pass
+
+        # Authoritative program switch: route through existing output switching pipeline
+        # so that GraphicsOutputWidget, streaming/recording, and external display stay consistent.
+        self.active_program_source = (source_type, index)
+        try:
+            self.set_output_source(source_type, index)
+        except Exception:
+            # Fallback to immediate program switch if transition pipeline is unavailable
+            try:
+                self._set_output_source_immediate(source_type, index)
+            except Exception:
+                pass
+        # Keep legacy state in sync (many frame handlers still reference current_output)
+        self.current_output = (source_type, index)
+        self.update_tally_lights()
+
+    def cut_transition(self):
+        """Immediate cut between Preview and Program (NO transition animation)."""
+        # This is for instant cuts - do NOT call auto_transition
+        # Swap sources and perform an immediate program cut
+        try:
+            # Promote preview text overlay settings to Program when cutting
+            # This ensures text overlay appears on program with same settings as preview
+            if hasattr(self, 'preview_text_settings') and isinstance(self.preview_text_settings, dict):
+                self.program_text_settings = dict(self.preview_text_settings)
+        except Exception:
+            pass
+        prev = getattr(self, 'active_preview_source', ('input', 1))
+        prog = getattr(self, 'active_program_source', None)
+        if prog is None:
+            prog = ('input', 1)  # Fallback when Program was empty (preview-first workflow)
+        # Commit preview -> program immediately
+        try:
+            self._pending_program_swap = None
+        except Exception:
+            pass
+
+        # Effect workflow: commit preview effect to LIVE on CUT
+        try:
+            self.program_overlay_path = getattr(self, 'preview_overlay_path', None)
+            if hasattr(self, '_graphics_output') and self._graphics_output is not None:
+                if self.program_overlay_path:
+                    self._graphics_output.set_overlay_from_path(str(self.program_overlay_path), use_transition=False)
+                else:
+                    self._graphics_output.clear_overlay(use_transition=False)
+            # Do NOT clear preview effect: user wants to keep seeing the effect in Preview
+            # so they can continue tweaking without affecting Program
+        except Exception:
+            pass
+        # Promote preview text overlay settings to Program (Live) when transitioning
+        try:
+            # When cut_transition or auto_transition is called, sync the settings
+            # This is already done in auto_transition and cut_transition methods
+            pass
+        except Exception:
+            pass
+        try:
+            self._set_output_source_immediate(prev[0], int(prev[1]))
+        except Exception:
+            # Fallback
+            self.set_program_source(prev[0], int(prev[1]))
+        # Update buses
+        self.active_program_source = (prev[0], int(prev[1]))
+        self.current_output = self.active_program_source
+        self.active_preview_source = (prog[0], int(prog[1]))
+        self.update_tally_lights()
+        # Refresh preview monitor to show the newly assigned preview source
+        try:
+            if prog[0] == 'input':
+                self._update_preview_monitor(self.last_input_image.get(int(prog[1])), 'input', int(prog[1]))
+            elif prog[0] == 'media':
+                self._update_preview_monitor(self.last_media_image.get(int(prog[1])), 'media', int(prog[1]))
+        except Exception:
+            pass
+        print(f"CUT: Program={self.active_program_source}, Preview={self.active_preview_source}")
+
+    def auto_transition(self):
+        """Auto transition ONLY when AUTO button is clicked."""
+        # Perform a real transition from current program -> preview, then swap buses.
+        try:
+            prev = getattr(self, 'active_preview_source', None)
+            prog = getattr(self, 'active_program_source', None)
+            if not prev or not prog:
+                self.cut_transition()
+                return
+            # Ensure transition_duration_ms and selected_transition are set
+            if not hasattr(self, 'transition_duration_ms'):
+                self.transition_duration_ms = 700
+            if not hasattr(self, 'selected_transition'):
+                self.selected_transition = 'Fade'
+            # Use the selected transition (set only by button click)
+            transition_name = self.selected_transition or 'Fade'
+            # Promote preview text overlay to program BEFORE transition
+            if hasattr(self, 'preview_text_settings') and isinstance(self.preview_text_settings, dict):
+                self.program_text_settings = dict(self.preview_text_settings)
+            # Store pending swap so _on_transition_done can update buses consistently
+            self._pending_program_swap = {
+                'from': (prog[0], int(prog[1])),
+                'to': (prev[0], int(prev[1])),
+            }
+            # Route through output switcher which invokes TransitionManager when enabled
+            self.set_output_source(prev[0], int(prev[1]))
+            print(f"AUTO: transitioning Program {prog} -> {prev} with {transition_name} ({self.transition_duration_ms}ms)")
+        except Exception as e:
+            # Safe fallback
+            print(f"AUTO transition error: {e}")
+            self.cut_transition()
+
+    def update_tally_lights(self):
+        """Update the visual tally state of all inputs and media."""
+        # Common Tally Style Helpers
+        def set_tally(widget, status):
+            if not widget: return
+            widget.setProperty("tally", status)
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+
+        # Update Input Tallies
+        for i in range(1, 4):
+            # Inputs
+            w = getattr(self, f'inputDisplay{i}', None)
+            set_tally(w, "")
+            
+            # Media
+            m = getattr(self, f'mediaDisplay{i}', None)
+            set_tally(m, "")
+
+        # Set Program Tally (Red) - may be None until CUT is pressed
+        prog = getattr(self, 'active_program_source', None)
+        if prog is not None:
+            p_type, p_idx = prog
+            if p_type == 'input':
+                set_tally(getattr(self, f'inputDisplay{p_idx}', None), "program")
+            elif p_type == 'media':
+                set_tally(getattr(self, f'mediaDisplay{p_idx}', None), "program")
+
+        # Set Preview Tally (Blue)
+        pv = getattr(self, 'active_preview_source', None)
+        if pv is None:
+            pv = ('input', 1)
+        pv_type, pv_idx = pv
+        if pv_type == 'input':
+            set_tally(getattr(self, f'inputDisplay{pv_idx}', None), "preview")
+        elif pv_type == 'media':
+             set_tally(getattr(self, f'mediaDisplay{pv_idx}', None), "preview")
+            
+    # --- New Playback Control Methods ---
+    def _toggle_preview_playback(self):
+        """Toggle playback for the active preview media."""
+        try:
+            st, idx = self.active_preview_source
+            if st != 'media': return
+            
+            player = self.media_players.get(idx)
+            if not player: return
+            
+            if player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                player.pause()
+                if hasattr(self, 'btn_prev_play'):
+                    self.btn_prev_play.setIcon(self.get_icon("Play.png"))
+            else:
+                player.play()
+                if hasattr(self, 'btn_prev_play'):
+                    self.btn_prev_play.setIcon(self.get_icon("Pause.png"))
+        except Exception as e:
+            print(f"Preview playback error: {e}")
+
+    def _seek_preview_media(self, val):
+        """Seek preview media based on slider (0-1000)."""
+        try:
+            st, idx = self.active_preview_source
+            if st != 'media': return
+            
+            player = self.media_players.get(idx)
+            if not player: return
+            
+            dur = player.duration()
+            if dur > 0:
+                pos = int(dur * (val / 1000.0))
+                player.setPosition(pos)
+        except Exception:
+            pass
+
+    def _update_status_bar(self):
+        """Update status bar metrics"""
+        try:
+            import psutil
+            import time
+            
+            # CPU/RAM
+            cpu = psutil.cpu_percent()
+            mem = psutil.Process().memory_info().rss / 1024 / 1024
+            if hasattr(self, 'status_cpu'): self.status_cpu.setText(f"{cpu:.1f}%")
+            if hasattr(self, 'status_ram'): self.status_ram.setText(f"{mem:.0f}MB")
+            
+            # Clock
+            self.status_clock.setText(time.strftime("%H:%M:%S"))
+            
+            # FPS (Mock for now, or hook into real FPS controller)
+            if hasattr(self, 'status_fps'): self.status_fps.setText("60")
+            
+        except Exception:
+            pass
 
     def load_ui(self):
         """Load UI from .ui file directly"""
@@ -861,20 +3699,31 @@ class GoLiveStudio(QMainWindow):
             # Load effects from folder into tabs
             self.load_effects_into_tabs()
 
+            # Master-clock-driven Preview refresh (independent from Program pipeline)
+            try:
+                from fps_controller import get_fps_controller
+                self._preview_clock = get_fps_controller()
+                # Connect once
+                if not hasattr(self, '_preview_clock_connected') or not self._preview_clock_connected:
+                    self._preview_clock.frame_ready.connect(self._on_master_frame_tick)
+                    self._preview_clock_connected = True
+                # Ensure the master clock is running
+                if not getattr(self._preview_clock, 'is_running', False):
+                    self._preview_clock.start()
+            except Exception:
+                pass
+
             # Make transitions panel grow to fill extra space on the right
             self.apply_right_panel_stretch()
 
             # Make effects tabs grow to fill extra space on the left
             self.apply_left_panel_stretch()
 
-            # Install a vertical splitter in the left panel: Output (top) | Effects (bottom)
-            self.apply_left_splitter()
+            # Apply Modern Redesign
+            self.apply_modern_redesign()
 
-            # Install a vertical splitter in the right panel: Sources grid (top) | Transitions (bottom)
-            self.apply_right_splitter()
-
-            # After layout is ready, set splitter sizes to sane defaults
-            QTimer.singleShot(0, self._init_splitter_sizes)
+            # Force unlock bottom section size constraints and prioritize video area
+            self._unlock_video_dominance()
 
             # Install output aspect guard to enforce 16:9 based on actual width
             QTimer.singleShot(0, self._install_output_aspect_guard)
@@ -1096,19 +3945,21 @@ class GoLiveStudio(QMainWindow):
             print(f"Error connecting UI signals: {e}")
 
         # Connect switching controls
+        # ISSUE 2 & 3 FIX: Changed to set_preview_source so transitions apply to preview FIRST,
+        # then click AUTO to transition preview -> program. This matches professional broadcast workflow.
         try:
             if hasattr(self, 'switchInput1Btn'):
-                self.switchInput1Btn.clicked.connect(lambda: self.set_output_source('input', 1))
+                self.switchInput1Btn.clicked.connect(lambda: self.set_preview_source('input', 1))
             if hasattr(self, 'switchInput2Btn'):
-                self.switchInput2Btn.clicked.connect(lambda: self.set_output_source('input', 2))
+                self.switchInput2Btn.clicked.connect(lambda: self.set_preview_source('input', 2))
             if hasattr(self, 'switchInput3Btn'):
-                self.switchInput3Btn.clicked.connect(lambda: self.set_output_source('input', 3))
+                self.switchInput3Btn.clicked.connect(lambda: self.set_preview_source('input', 3))
             if hasattr(self, 'switchMedia1Btn'):
-                self.switchMedia1Btn.clicked.connect(lambda: self.set_output_source('media', 1))
+                self.switchMedia1Btn.clicked.connect(lambda: self.set_preview_source('media', 1))
             if hasattr(self, 'switchMedia2Btn'):
-                self.switchMedia2Btn.clicked.connect(lambda: self.set_output_source('media', 2))
+                self.switchMedia2Btn.clicked.connect(lambda: self.set_preview_source('media', 2))
             if hasattr(self, 'switchMedia3Btn'):
-                self.switchMedia3Btn.clicked.connect(lambda: self.set_output_source('media', 3))
+                self.switchMedia3Btn.clicked.connect(lambda: self.set_preview_source('media', 3))
         except Exception as e:
             print(f"Error connecting switching controls: {e}")
     def toggle_media_playback(self, media_index):
@@ -1240,15 +4091,24 @@ class GoLiveStudio(QMainWindow):
 
     def _on_media_position_changed(self, media_index, pos_ms):
         """Update UI when media position changes"""
-        # Update slider
-        slider_attr = {1: 'horizontalSlider', 2: 'horizontalSlider_2', 3: 'horizontalSlider_3'}.get(media_index)
-        if slider_attr and hasattr(self, slider_attr):
-            slider = getattr(self, slider_attr)
-            dur = max(1, self.media_players[media_index].duration())
-            percent = int((pos_ms / dur) * 100)
-            slider.blockSignals(True)
-            slider.setValue(percent)
-            slider.blockSignals(False)
+        try:
+            # Update slider
+            slider_attr = {1: 'horizontalSlider', 2: 'horizontalSlider_2', 3: 'horizontalSlider_3'}.get(media_index)
+            if slider_attr and hasattr(self, slider_attr):
+                slider = getattr(self, slider_attr)
+                if slider:
+                    dur = max(1, self.media_players[media_index].duration())
+                    percent = int((pos_ms / dur) * 100)
+                    slider.blockSignals(True)
+                    slider.setValue(percent)
+                    slider.blockSignals(False)
+        except RuntimeError:
+            # Ignore "wrapped C/C++ object has been deleted"
+            pass
+        except Exception as e:
+            # print(f"Slider update error: {e}")
+            pass
+
         # Update controls (icon)
         self.update_media_controls(media_index)
 
@@ -1359,8 +4219,30 @@ class GoLiveStudio(QMainWindow):
                 # Store last and update output if selected
                 self.last_media_pixmap[media_index] = scaled
                 if not getattr(self, '_transition_running', False) and self.current_output == ('media', media_index):
-                    # Use original for output to avoid double-scaling loss
+                    # Use original for output to avoid scaling artifacts
                     self._set_output_image(self.last_media_image[media_index])
+
+            # 4. Update Preview Monitor (Fix for Media Preview Playback)
+            if hasattr(self, 'active_preview_source') and self.active_preview_source == ('media', media_index):
+                 if hasattr(self, 'preview_video_label'):
+                    # Calculate size once
+                    preview_size = self.preview_video_label.size()
+                    if preview_size.width() > 1 and preview_size.height() > 1:
+                        # Use cached processed image if available, else raw
+                        src_img = self.last_media_image.get(media_index, image)
+                        preview_pix = QPixmap.fromImage(src_img).scaled(
+                            preview_size,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+                        self.preview_video_label.setPixmap(preview_pix)
+                        self.preview_video_label.setText("")
+
+            # 5. Loop Logic (if enabled)
+            # Handled via QMediaPlayer loops usually, but if manual loop needed:
+            # if self.media_loops[media_index] and player.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia:
+            #     player.play()
+
         except Exception as e:
             print(f"Error rendering media frame for Media-{media_index}: {e}")
 
@@ -1670,9 +4552,9 @@ class GoLiveStudio(QMainWindow):
                     if found is not None:
                         effects_container = w
                 # Also support the new PremiereEffectsPanel as the marker for the effects area
+                # Use FinalEffectsPanel as the marker for the effects area (v2 not found)
                 try:
-                    from premiere_effects_panel_v2 import PremiereEffectsPanelV2 as _PEP
-                    # If the panel itself is the widget, or the widget contains it
+                    from premiere_effects_panel_final import FinalEffectsPanel as _PEP
                     if isinstance(w, _PEP) or (hasattr(w, 'findChild') and w.findChild(_PEP) is not None):
                         effects_container = w
                 except Exception:
@@ -1682,14 +4564,12 @@ class GoLiveStudio(QMainWindow):
             if effects_container is None:
                 # Try to find an existing PremiereEffectsPanel anywhere and move it under left panel
                 try:
-                    from premiere_effects_panel_v2 import PremiereEffectsPanelV2 as _PEP
+                    from premiere_effects_panel_final import FinalEffectsPanel as _PEP
                     found_panel = None
-                    # Look in all children of the main window
                     for child in self.findChildren(_PEP):
                         found_panel = child
                         break
                     if found_panel is not None:
-                        # Remove from its current layout
                         try:
                             par = found_panel.parent()
                             if par and hasattr(par, 'layout') and par.layout():
@@ -1814,49 +4694,119 @@ class GoLiveStudio(QMainWindow):
             print(f"Error initializing splitter sizes: {e}")
 
     def resizeEvent(self, event):
-        """Keep output 16:9 and dominant by adjusting splitter on window resize."""
+        """Allow responsive sizing of video/monitor area with 16:9 aspect ratio."""
         super().resizeEvent(event)
-        # Defer to let Qt finish layout, then adjust
-        QTimer.singleShot(0, self._adjust_splitters_for_aspect)
+        
+        # Ignore minimized windows to avoid errors
+        if self.height() <= 0 or self.width() <= 0:
+            return
+        
+        try:
+            # Allow monitor_area to size responsively (do NOT force fixed heights)
+            # The AspectRatioFrame and heightForWidth policy handle 16:9 automatically
+            if hasattr(self, 'monitor_area') and self.monitor_area:
+                # Only set minimum, allow maximum to be unlimited for responsiveness
+                self.monitor_area.setMinimumHeight(360)
+                # Do NOT set maximum height - this prevents proper scaling
+                
+                # Schedule layout update to take effect
+                QTimer.singleShot(0, self.update)
+        except Exception as e:
+            print(f"[VIDEO HEIGHT] Error: {e}")
+
+    def apply_forced_layout(self):
+        """Apply responsive layout when window appears. Called from showEvent."""
+        try:
+            # Allow monitor_area to size responsively with minimum height constraint
+            if hasattr(self, 'monitor_area') and self.monitor_area:
+                self.monitor_area.setMinimumHeight(360)
+                # Do NOT set maximum height - allows responsive scaling
+            
+            # Set workspace (controls) to expand but not force minimum
+            if hasattr(self, 'workspace_stack') and self.workspace_stack:
+                self.workspace_stack.setMinimumHeight(200)
+                self.workspace_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            
+            # Refresh monitor styles to handle Windows minimize/restore bug
+            self._refresh_monitor_styles()
+            
+            # Force immediate layout update
+            if self.centralWidget() and self.centralWidget().layout():
+                self.centralWidget().layout().activate()
+        except Exception as e:
+            print(f"[LAYOUT] Error: {e}")
+
+    def _refresh_monitor_styles(self):
+        """Refresh monitor styles to ensure they persist after minimize/restore on Windows."""
+        try:
+            # Reapply styling to preview monitor
+            if hasattr(self, 'preview_video_label'):
+                self.preview_video_label.setStyleSheet("background-color: black; color: rgba(255, 255, 255, 0.4); font-size: 13px; font-weight: 500;")
+            
+            # Find and reapply Preview frame styles with correct size policies
+            for widget in self.findChildren(QFrame, "previewMonitor"):
+                widget.setStyleSheet("QFrame#previewMonitor { overflow: hidden; border: 2px solid #0078d4; border-radius: 4px; background-color: black; }")
+                widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            
+            # Find and reapply Program frame styles with correct size policies
+            for widget in self.findChildren(QFrame, "programMonitor"):
+                widget.setStyleSheet("QFrame#programMonitor { overflow: hidden; border: 2px solid #d13438; border-radius: 4px; background-color: black; }")
+                widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            
+            # Reapply container styles and size policies
+            for widget in self.findChildren(QFrame, "previewContainer"):
+                widget.setStyleSheet("QFrame#previewContainer { background-color: #1a1a1a; border: none; }")
+                widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            
+            for widget in self.findChildren(QFrame, "programContainer"):
+                widget.setStyleSheet("QFrame#programContainer { background-color: #1a1a1a; border: none; }")
+                widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            
+            # Ensure titles are visible and properly styled with correct colors
+            for label in self.findChildren(QLabel):
+                if label.text() in ["Preview", "PREVIEW"]:
+                    label.setStyleSheet("color: #0078d4; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;")
+                elif label.text() in ["Program Live", "PROGRAM LIVE"]:
+                    label.setStyleSheet("color: #d13438; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;")
+        except Exception as e:
+            print(f"[STYLE_REFRESH] Error: {e}")
 
     def _adjust_splitters_for_aspect(self):
         try:
             if hasattr(self, '_left_splitter') and self._left_splitter and hasattr(self, 'outputPreview'):
                 splitter = self._left_splitter
-                # Available panel height and the ACTUAL width of the output frame
+                # Available panel height
                 avail_h = max(1, splitter.height())
-                frame = self.outputPreview
-                # If frame hasn't been laid out yet, fall back to splitter width
-                avail_w = max(1, frame.width() if frame.width() > 1 else splitter.width())
-                aspect = 16.0 / 9.0
-                # Ideal output height based on current width
-                ideal_out_h = int(avail_w / aspect)
-                # Use as much height as needed for an exact 16:9 based on current width
-                min_effects = 100  # keep effects usable but secondary
-                out_h = min(ideal_out_h, max(0, avail_h - min_effects))
-                # Ensure output gets most of the panel height
-                min_out_ratio = 0.85
-                if out_h < int(avail_h * min_out_ratio):
-                    out_h = int(avail_h * min_out_ratio)
+                # Allocate heights proportionally: video gets 75%, effects get 25%
+                min_effects = 100
+                out_h = max(300, int(avail_h * 0.75))
                 eff_h = max(min_effects, avail_h - out_h)
                 splitter.setSizes([out_h, eff_h])
-                # Also clamp the output frame to this height for exact 16:9
-                try:
-                    frame.setMinimumHeight(out_h)
-                    frame.setMaximumHeight(out_h)
-                except Exception:
-                    pass
-                # Resize-driven refresh
+                # Do NOT set fixed heights on frame - allows responsive sizing
                 self.refresh_output_preview()
         except Exception as e:
-            print(f"Error adjusting splitters for aspect: {e}")
+            print(f"Error adjusting splitters: {e}")
 
     def _ensure_output_preview_label(self):
         """Install the GraphicsOutputWidget into outputPreview container."""
         if hasattr(self, 'outputPreview'):
+            # FORCE Overlay to sit ON TOP of the video and match size
+            if hasattr(self, 'graphics_widget') and hasattr(self, 'program_frame'):
+                self.graphics_widget.setParent(self.program_frame)
+                self.graphics_widget.raise_()
+                self.graphics_widget.show()
+                self.program_frame.resizeEvent = lambda e: self.graphics_widget.resize(e.size())
+                self.graphics_widget.resize(self.program_frame.size())
             from PyQt6.QtWidgets import QVBoxLayout, QSizePolicy
             frame = self.outputPreview
             if self._graphics_output is None:
+                # FIX 3: Cleanup old instance if it somehow still exists (in case method is called twice)
+                pre_existing = getattr(self, '_graphics_output_temp', None)
+                if pre_existing is not None:
+                    try:
+                        pre_existing._cleanup_render_thread()
+                    except Exception:
+                        pass
                 # Try enhanced graphics output first (fixes pixelation)
                 try:
                     from enhanced_graphics_output import EnhancedGraphicsOutputWidget
@@ -1870,7 +4820,12 @@ class GoLiveStudio(QMainWindow):
                         print(f"Created graphics output: {renderer_type}")
                     else:
                         # Force legacy CPU path to guarantee full feature parity
-                        from graphics_output import GraphicsOutputWidget as _LegacyGOW
+                        # No graphics_output.py available, fallback to EnhancedGraphicsOutputWidget
+                        # Fix 2: Cleanup old instance if it exists before creating new one
+                        if hasattr(self, '_graphics_output') and self._graphics_output is not None:
+                            self._graphics_output._cleanup_render_thread()
+                            self._graphics_output = None
+                        from enhanced_graphics_output import EnhancedGraphicsOutputWidget as _LegacyGOW
                         view = _LegacyGOW(frame)
                 view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
                 if not frame.layout():
@@ -1887,6 +4842,20 @@ class GoLiveStudio(QMainWindow):
                 frame.layout().addWidget(view)
                 self._graphics_output = view
 
+                # Effects workflow: ensure no overlay is applied at startup
+                try:
+                    self._graphics_output.clear_overlay(use_transition=False)
+                except Exception:
+                    try:
+                        self._graphics_output.clear_overlay()
+                    except Exception:
+                        pass
+                try:
+                    self.program_overlay_path = None
+                    self.preview_overlay_path = None
+                except Exception:
+                    pass
+
     def _install_output_aspect_guard(self):
         try:
             if not hasattr(self, 'outputPreview') or self.outputPreview is None:
@@ -1899,21 +4868,9 @@ class GoLiveStudio(QMainWindow):
                     self.outer = outer
                 def eventFilter(self, obj, event):
                     if event.type() == QEvent.Type.Resize and hasattr(self.outer, 'outputPreview'):
-                        frame = self.outer.outputPreview
-                        aspect = 16.0/9.0
-                        w = max(1, frame.width())
-                        target_h = int(w / aspect)
-                        # Clamp frame to exact 16:9 height
-                        try:
-                            frame.setMinimumHeight(target_h)
-                            frame.setMaximumHeight(target_h)
-                        except Exception:
-                            pass
-                        # Nudge left splitter if present
-                        if hasattr(self.outer, '_left_splitter') and self.outer._left_splitter:
-                            avail_h = max(1, self.outer._left_splitter.height())
-                            eff_h = max(100, avail_h - target_h)
-                            self.outer._left_splitter.setSizes([target_h, eff_h])
+                        # Do NOT force fixed heights - allow responsive sizing
+                        # The AspectRatioFrame and heightForWidth policy handle 16:9
+                        pass
                     return QObject.eventFilter(self, obj, event)
             self._output_aspect_guard = _Guard(self)
             # Monitor both the output frame and its parent container for resizes
@@ -1932,18 +4889,29 @@ class GoLiveStudio(QMainWindow):
 
     def _set_output_image(self, image: QImage):
         """Send frame to graphics output widget; falls back to black if None."""
-        # ✅ APPLY TEXT OVERLAY BEFORE SENDING TO OUTPUT
         final_image = image
         if image is not None:
             try:
-                from text_overlay_renderer import text_overlay_renderer
-                if text_overlay_renderer.is_enabled():
-                    final_image = text_overlay_renderer.render_overlay(image)
+                text_settings = None
+                if hasattr(self, 'program_text_settings') and isinstance(self.program_text_settings, dict):
+                    if self.program_text_settings.get('text', '').strip():
+                        # Use program text but always apply preview's CURRENT position settings
+                        text_settings = dict(self.program_text_settings)
+                        if hasattr(self, 'preview_text_settings') and isinstance(self.preview_text_settings, dict):
+                            text_settings['position_x'] = self.preview_text_settings.get('position_x', 50)
+                            text_settings['position_y'] = self.preview_text_settings.get('position_y', 90)
+                            text_settings['alignment'] = self.preview_text_settings.get('alignment', 'center')
+
+                if text_settings:
+                    from text_overlay_renderer import TextOverlayRenderer
+                    if not hasattr(self, '_program_text_renderer'):
+                        self._program_text_renderer = TextOverlayRenderer()
+                    self._program_text_renderer.update_settings(text_settings)
+                    final_image = self._program_text_renderer.render_overlay(image)
             except Exception as e:
-                print(f"Text overlay error: {e}")
-                # Continue with original image if overlay fails
+                print(f"[Program Text] Error: {e}")
                 final_image = image
-        
+
         if self._graphics_output is not None:
             self._graphics_output.set_frame(final_image)
 
@@ -1952,7 +4920,7 @@ class GoLiveStudio(QMainWindow):
         If a transition is selected, perform animated switch; otherwise immediate.
         """
         # If we're already in a transition, ignore new requests
-        if self._transition_running:
+        if getattr(self, '_transition_running', False):
             return
         # Notify streaming backends to clear old audio and add a small safety delay
         try:
@@ -2013,6 +4981,14 @@ class GoLiveStudio(QMainWindow):
             print(f"Switched to Input {index} (paused all media)")
         
         self.current_output = (source_type, index)
+        
+        # Clear pending frame queues to discard backlog from previous input
+        # Prevents FPS drops when switching inputs due to queued deferred tasks
+        if hasattr(self, '_qt_frame_deferred_pending'):
+            self._qt_frame_deferred_pending.clear()
+        if hasattr(self, '_qt_pending_frames'):
+            self._qt_pending_frames.clear()
+        
         # Attempt to immediately update output with last known frame
         if getattr(self, '_transition_running', False):
             return
@@ -2104,11 +5080,26 @@ class GoLiveStudio(QMainWindow):
             pass
 
     def begin_transition_to(self, source_type: str, index: int):
-        """Run a non-blocking transition from the current program frame to the target source."""
+        """Run a non-blocking transition from the current program frame to the target source.
+        
+        ISSUE 3 FIX: Apply preview overlay immediately so it renders during the transition.
+        This ensures the program shows the preview's complete appearance (source + overlay).
+        """
         try:
             if not self._graphics_output:
                 self._set_output_source_immediate(source_type, index)
                 return
+            
+            # ISSUE 3 FIX: Switch to preview's overlay IMMEDIATELY for transition rendering
+            # This ensures the overlay is visible during the transition animation
+            try:
+                preview_overlay = getattr(self, 'preview_overlay_path', None)
+                if preview_overlay and os.path.exists(str(preview_overlay)):
+                    # Use transition=True to smoothly fade overlay during effect change
+                    self._graphics_output.set_overlay_from_path(str(preview_overlay), use_transition=True)
+            except Exception as e:
+                pass
+            
             # Capture current composited frame from preview
             size = self._graphics_output._scene_size() if hasattr(self._graphics_output, '_scene_size') else self._graphics_output.size()
             if hasattr(size, 'width') and hasattr(size, 'height'):
@@ -2150,11 +5141,73 @@ class GoLiveStudio(QMainWindow):
         self._set_output_source_immediate(source_type, index)
 
     def _on_transition_done(self, source_type: str, index: int):
-        """Clear transition lock and finalize switch safely."""
+        """Clear transition lock and finalize switch safely.
+        
+        ISSUE 3 FIX: After transition completes, ensure program overlay is finalized.
+        """
         try:
             self._transition_running = False
         except Exception:
             pass
+        # If AUTO transition is running, swap Preview/Program buses consistently
+        try:
+            pending = getattr(self, '_pending_program_swap', None)
+        except Exception:
+            pending = None
+        if isinstance(pending, dict) and pending.get('to'):
+            try:
+                to_src = pending.get('to')
+                from_src = pending.get('from')
+                if isinstance(to_src, tuple) and len(to_src) == 2:
+                    self.active_program_source = (to_src[0], int(to_src[1]))
+                    self.current_output = self.active_program_source
+                if isinstance(from_src, tuple) and len(from_src) == 2:
+                    # The old program becomes the new preview
+                    self.active_preview_source = (from_src[0], int(from_src[1]))
+                # Clear pending state
+                try:
+                    self._pending_program_swap = None
+                except Exception:
+                    pass
+                # Update UI tallies and preview monitor
+                try:
+                    self.update_tally_lights()
+                except Exception:
+                    pass
+                try:
+                    pv = getattr(self, 'active_preview_source', None)
+                    if pv and isinstance(pv, tuple) and len(pv) == 2:
+                        if pv[0] == 'input':
+                            self._update_preview_monitor(self.last_input_image.get(int(pv[1])), 'input', int(pv[1]))
+                        elif pv[0] == 'media':
+                            self._update_preview_monitor(self.last_media_image.get(int(pv[1])), 'media', int(pv[1]))
+                except Exception:
+                    pass
+
+                # Effect workflow: commit preview effect to LIVE at end of AUTO
+                # ISSUE 3 FIX: Ensure the overlay persists correctly after transition
+                try:
+                    self.program_overlay_path = getattr(self, 'preview_overlay_path', None)
+                    if hasattr(self, '_graphics_output') and self._graphics_output is not None:
+                        if self.program_overlay_path:
+                            # Overlay should already be set (done in begin_transition_to)
+                            # Just make sure it's finalized without transition
+                            self._graphics_output.set_overlay_from_path(str(self.program_overlay_path), use_transition=False)
+                        else:
+                            self._graphics_output.clear_overlay(use_transition=False)
+                    # Do NOT clear preview effect here; keep it on Preview for continued auditioning
+                except Exception as e:
+                    pass
+                    
+                # Promote preview text overlay settings to Program (Live) at end of AUTO
+                try:
+                    if hasattr(self, 'preview_text_settings') and isinstance(self.preview_text_settings, dict):
+                        self.program_text_settings = dict(self.preview_text_settings)
+                except Exception:
+                    pass
+            except Exception as e:
+                pass
+        # Finalize the program output switch
         self._finalize_switch_to(source_type, index)
 
     def _compose_frame_for_source(self, source_type: str, index: int, target_size: QSize) -> QImage | None:
@@ -2261,7 +5314,7 @@ class GoLiveStudio(QMainWindow):
             # Store dynamically created buttons here
             self.transition_buttons = []
             entries = [('None', 'No transition (instant switch)')] + TRANSITIONS_CATALOG
-            cols = 3
+            cols = 2 # Changed to 2 columns to fit better
             row, col = 0, 0
 
             for name, desc in entries:
@@ -2276,11 +5329,14 @@ class GoLiveStudio(QMainWindow):
                         border: 2px solid #404040;
                         border-radius: 4px;
                         color: #ffffff;
-                        font-size: 10px;
+                        font-size: 9px;
                         font-weight: bold;
-                        padding: 4px;
+                        padding: 2px;
                         text-align: center;
-                        min-height: 48px;
+                        min-height: 30px;
+                        max-height: 30px;
+                        margin: 0px;
+                        max-width: 90px;
                     }
                     QPushButton:hover {
                         background-color: #505050;
@@ -2306,15 +5362,163 @@ class GoLiveStudio(QMainWindow):
             print(f"Error dynamically populating transitions panel: {e}")
 
     def _on_transition_selected(self):
-        """Handle click on any transition button."""
+        """Handle click on any transition button (ONLY store, no-op until AUTO clicked)."""
         sender = self.sender()
         if not sender:
             return
         name = sender.property("transition_name")
+        # ONLY store the selected transition - DO NOT apply it
         self.selected_transition = name
+        self.pending_transition = name
         app_config.set('ui.transition.type', name)
         app_config.save_settings()
+        try:
+            if hasattr(self, 'lbl_switch_transition') and self.lbl_switch_transition is not None:
+                self.lbl_switch_transition.setText(f"Transition: {name}")
+        except Exception:
+            pass
+        # ⚠️ CRITICAL: Do NOT call auto_transition() here
+        # Transitions only execute when user explicitly clicks the AUTO button
+        print(f"[TRANSITION] Selected: {name} (will apply when AUTO is clicked)")
+        # Show visual demo of selected transition in Preview monitor only (Program untouched)
+        try:
+            sel = (self.selected_transition or 'None').strip()
+            if sel.lower() not in ('none', ''):
+                self._preview_transition_demo()
+        except Exception:
+            pass
         self._update_transition_selection_ui()
+
+    def _preview_transition_demo(self):
+        """Show a visual demo of the selected transition in the Preview monitor only.
+        Program Live is NOT affected. After demo ends, Preview restores to live source.
+        """
+        try:
+            from PyQt6.QtCore import QSize
+            from PyQt6.QtGui import QPixmap
+
+            if not hasattr(self, 'preview_video_label') or self.preview_video_label is None:
+                return
+
+            pv = getattr(self, 'active_preview_source', None)
+            pg = getattr(self, 'active_program_source', None)
+            if not pv or not pg:
+                return
+
+            preview_size = self.preview_video_label.size()
+            if preview_size.width() <= 1 or preview_size.height() <= 1:
+                preview_size = QSize(566, 286)
+
+            # A = current Program frame, B = current Preview frame
+            a_frame = self._get_base_frame_for_source(pg[0], int(pg[1]), preview_size)
+            b_frame = self._get_base_frame_for_source(pv[0], int(pv[1]), preview_size)
+
+            if a_frame is None or a_frame.isNull() or b_frame is None or b_frame.isNull():
+                return
+
+            tname = self.selected_transition or 'Fade'
+            dur = int(self.transition_duration_ms or 700)
+
+            # Use a dedicated manager so Program's transition state is never touched
+            if not hasattr(self, '_preview_demo_manager') or self._preview_demo_manager is None:
+                from transitions import TransitionManager
+                self._preview_demo_manager = TransitionManager(self)
+
+            def _on_demo_frame(img):
+                try:
+                    lbl = getattr(self, 'preview_video_label', None)
+                    if lbl is None:
+                        return
+                    # Composite the preview overlay on top of the transition frame
+                    # so the filter stays visible during the animation (matches Program behavior)
+                    pfx = getattr(self, 'preview_overlay_path', None)
+                    if pfx and os.path.exists(str(pfx)):
+                        try:
+                            from PyQt6.QtGui import QPainter, QColor
+                            from PyQt6.QtCore import QRectF
+                            preview_size = img.size()
+                            # Load/use cached overlay image
+                            if not hasattr(self, '_preview_overlay_image') or \
+                               getattr(self, '_preview_overlay_cache_path', None) != pfx:
+                                self._preview_overlay_image = QImage(str(pfx))
+                                self._preview_overlay_cache_path = pfx
+                                self._preview_opening_norm = self._detect_overlay_opening(
+                                    str(pfx), self._preview_overlay_image)
+                                self._preview_scaled_overlay_cache = {}
+                                self._preview_geom_cache = {}
+                            overlay_img = self._preview_overlay_image
+                            opening_norm = self._preview_opening_norm
+                            if overlay_img and not overlay_img.isNull():
+                                cache_key = (preview_size.width(), preview_size.height())
+                                if not hasattr(self, '_preview_geom_cache'):
+                                    self._preview_geom_cache = {}
+                                geom = self._preview_geom_cache.get(cache_key)
+                                if geom is None:
+                                    src_w, src_h = overlay_img.width(), overlay_img.height()
+                                    dst_w, dst_h = preview_size.width(), preview_size.height()
+                                    scale = min(dst_w / src_w, dst_h / src_h)
+                                    scaled_w = int(src_w * scale)
+                                    scaled_h = int(src_h * scale)
+                                    off_x = (dst_w - scaled_w) // 2
+                                    off_y = (dst_h - scaled_h) // 2
+                                    geom = (scaled_w, scaled_h, off_x, off_y)
+                                    self._preview_geom_cache[cache_key] = geom
+                                scaled_w, scaled_h, off_x, off_y = geom
+                                if not hasattr(self, '_preview_scaled_overlay_cache'):
+                                    self._preview_scaled_overlay_cache = {}
+                                scaled_overlay = self._preview_scaled_overlay_cache.get(cache_key)
+                                if scaled_overlay is None:
+                                    scaled_overlay = overlay_img.scaled(
+                                        QSize(scaled_w, scaled_h),
+                                        Qt.AspectRatioMode.IgnoreAspectRatio,
+                                        Qt.TransformationMode.FastTransformation)
+                                    self._preview_scaled_overlay_cache[cache_key] = scaled_overlay
+                                # Build canvas: transition frame as background, overlay on top
+                                canvas = QImage(preview_size, QImage.Format.Format_ARGB32)
+                                canvas.fill(QColor(0, 0, 0, 255))
+                                painter = QPainter(canvas)
+                                try:
+                                    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+                                    # Draw transition frame in opening area if detected
+                                    if opening_norm:
+                                        nx, ny, nw, nh = opening_norm
+                                        video_rect = QRectF(
+                                            off_x + nx * scaled_w, off_y + ny * scaled_h,
+                                            max(1.0, nw * scaled_w), max(1.0, nh * scaled_h))
+                                        painter.drawImage(video_rect, img, QRectF(img.rect()))
+                                    else:
+                                        painter.drawImage(QRectF(img.rect()), img, QRectF(img.rect()))
+                                    # Draw overlay on top — filter stays visible
+                                    painter.drawImage(off_x, off_y, scaled_overlay)
+                                finally:
+                                    painter.end()
+                                img = canvas
+                        except Exception:
+                            pass  # Fall through to display unmodified transition frame
+                    pix = QPixmap.fromImage(img)
+                    lbl.setPixmap(pix)
+                    lbl.setText("")
+                except Exception:
+                    pass
+
+            def _on_demo_done():
+                # Restore live preview source after demo finishes
+                try:
+                    self._force_preview_refresh()
+                except Exception:
+                    pass
+
+            self._preview_demo_manager.start_transition(
+                a_frame,
+                b_frame,
+                transition_type=tname,
+                duration_ms=dur,
+                easing='ease_in_out',
+                on_frame=_on_demo_frame,
+                on_done=_on_demo_done,
+            )
+        except Exception as e:
+            print(f"Preview transition demo error: {e}")
 
     def _update_transition_selection_ui(self):
         """Update the visual state of all transition buttons based on current selection."""
@@ -2475,6 +5679,12 @@ class GoLiveStudio(QMainWindow):
                 return
             if hasattr(self, button_name):
                 button = getattr(self, button_name)
+                # In redesigned UI, some legacy widgets may be deleted; avoid RuntimeError spam
+                try:
+                    if button is None or getattr(button, 'isVisible', None) is None:
+                        return
+                except RuntimeError:
+                    return
                 player = self.media_players.get(media_number)
                 if player:
                     playing = player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
@@ -2482,6 +5692,9 @@ class GoLiveStudio(QMainWindow):
                     button.setToolTip(("Pause" if playing else "Play") + f" Media {media_number}")
                     button.setMinimumSize(22, 22)
                     button.setMaximumSize(22, 22)
+        except RuntimeError:
+            # Ignore "wrapped C/C++ object has been deleted"
+            return
         except Exception as e:
             print(f"Error updating media controls: {e}")
 
@@ -2681,6 +5894,25 @@ class GoLiveStudio(QMainWindow):
         camera_sources = []
         try:
             system = platform.system()
+            
+            # On macOS, try native AVFoundation cameras first (NV12 hardware capture)
+            if system == "Darwin" and hasattr(self, '_macos_native') and self._macos_native:
+                try:
+                    native_cams = self._macos_native.get_native_cameras()
+                    for cam in native_cams:
+                        camera_sources.append({
+                            'index': cam['index'],
+                            'name': cam['name'] + ' (Native)',
+                            'resolution': '1920x1080',
+                            'fps': 60,
+                            'backend': 'avfoundation_native',
+                            'native_device': cam  # Store native device info
+                        })
+                    if native_cams:
+                        print(f"Detected {len(native_cams)} native AVFoundation camera(s)")
+                except Exception as e:
+                    print(f"[Camera] Native camera detection error: {e}")
+            
             if system == "Darwin":
                 # On macOS, enumerate with Qt; optionally probe with PyAV if available.
                 try:
@@ -3076,6 +6308,16 @@ class GoLiveStudio(QMainWindow):
         try:
             # Stop any existing capture for this input
             self.stop_camera_capture(input_number)
+
+            try:
+                if not hasattr(self, '_last_camera_info'):
+                    self._last_camera_info = {}
+                if isinstance(camera_info, dict):
+                    self._last_camera_info[int(input_number)] = dict(camera_info)
+                else:
+                    self._last_camera_info[int(input_number)] = camera_info
+            except Exception:
+                pass
             
             # Prevent multiple inputs from sharing the same camera index
             if not hasattr(self, 'input_camera_indices'):
@@ -3097,157 +6339,325 @@ class GoLiveStudio(QMainWindow):
             if not hasattr(self, 'last_input_pixmap'):
                 self.last_input_pixmap = {}
             
-            # On macOS prefer Qt Camera by device description to avoid AVFoundation index ambiguity
+            # Check if this is a native AVFoundation camera
+            native_device = camera_info.get('native_device') if isinstance(camera_info, dict) else None
+            backend = camera_info.get('backend', '') if isinstance(camera_info, dict) else ''
+            
+            if backend == 'avfoundation_native' and native_device and hasattr(self, '_macos_native') and self._macos_native:
+                # Use native AVFoundation camera capture
+                try:
+                    print(f"[CAMERA] Starting native AVFoundation capture for Input-{input_number}")
+                    success = self._macos_native.start_native_camera_capture(
+                        device_index=native_device['index'],
+                        width=1920,
+                        height=1080,
+                        fps=30,
+                        frame_callback=lambda frame, ts, idx=input_number: self._on_native_camera_frame(idx, frame)
+                    )
+                    if success:
+                        print(f"[CAMERA] Native AVFoundation camera started for Input-{input_number}")
+                        # Store native camera info for cleanup
+                        if not hasattr(self, '_native_camera_inputs'):
+                            self._native_camera_inputs = set()
+                        self._native_camera_inputs.add(input_number)
+                        return True
+                    else:
+                        print(f"[CAMERA] Native capture failed, falling back to Qt/OpenCV")
+                except Exception as e:
+                    print(f"[CAMERA] Native capture error: {e}")
+            
+            # Prefer Qt Camera when we have a QCameraDevice (reliable device selection on Windows/macOS)
             system = platform.system()
             used_qt_camera = False
-            if system == "Darwin":
+            used_obs_pipeline = False
+            timer = None
+            dev = camera_info.get('device')  # QCameraDevice from InputSettingsDialog
+            if dev is None:
+                target_name = str(camera_info.get('name', '') or '')
                 try:
-                    target_name = str(camera_info.get('name', '') or '')
                     from PyQt6.QtMultimedia import QMediaDevices
-                    dev = None
                     for d in QMediaDevices.videoInputs():
-                        if d.description() == target_name:
+                        if d.description() == target_name or (target_name and target_name.strip('📹 ') in d.description()):
                             dev = d
                             break
-                    # Prefer AVFoundation via PyAV for high-FPS capture when available
-                    # USER REQUEST: Disable PyAV to fix stability issues ("working very worstly")
-                    # PyAV capture block removed for stability.
-                    prefer_pyav = False 
-                    # if prefer_pyav: ... (removed)
-                    if not used_qt_camera and dev is not None:
-                        if not hasattr(self, 'qt_cameras'):
-                            self.qt_cameras = {}
-                        if not hasattr(self, 'qt_sessions'):
-                            self.qt_sessions = {}
-                        if not hasattr(self, 'qt_sinks'):
-                            self.qt_sinks = {}
-                        # Prepare a simple FPS measurement buffer per input
-                        if not hasattr(self, '_fps_measure'):
-                            self._fps_measure = {}
-                        from collections import deque
-                        self._fps_measure[input_number] = {
-                            'times': deque(maxlen=120),  # ~2s at 60fps
-                            'last_report': 0.0,
-                            'measured_fps': None,
-                        }
-                        cam = QCamera(dev)
-                        # Choose the best available camera format by max FPS, prefer 1920x1080 on ties
-                        try:
-                            best_fmt = None
-                            best_key = (-1.0, 0, 0)  # fps, w, h
-                            all_fmt_log = []
-                            for fmt in dev.videoFormats():
-                                try:
-                                    fps_max = float(fmt.maxFrameRate())
-                                except Exception:
-                                    fps_max = 0.0
-                                size = fmt.resolution()
-                                w = int(size.width()) if hasattr(size, 'width') else int(getattr(size, 'width', 0))
-                                h = int(size.height()) if hasattr(size, 'height') else int(getattr(size, 'height', 0))
-                                key = (fps_max, w, h)
-                                all_fmt_log.append((w, h, fps_max))
-                                if (key > best_key) or (abs(fps_max - best_key[0]) < 0.1 and (w, h) == (1920, 1080)):
-                                    best_key = key
-                                    best_fmt = fmt
+                except Exception:
+                    dev = None
+            if dev is not None:
+                try:
+                    target_name = str(camera_info.get('name', '') or (dev.description() if hasattr(dev, 'description') else '') or '')
+                    if not hasattr(self, 'qt_cameras'):
+                        self.qt_cameras = {}
+                    if not hasattr(self, 'qt_sessions'):
+                        self.qt_sessions = {}
+                    if not hasattr(self, 'qt_sinks'):
+                        self.qt_sinks = {}
+                    if not hasattr(self, '_fps_measure'):
+                        self._fps_measure = {}
+                    from collections import deque
+                    self._fps_measure[input_number] = {
+                        'times': deque(maxlen=120),  # ~2s at 60fps
+                        'last_report': 0.0,
+                        'measured_fps': None,
+                    }
+                    cam = QCamera(dev)
+                    # Choose format matching user's resolution and FPS; PREFER MJPEG over raw
+                    user_fps = int(camera_info.get('fps') or 60)
+                    user_res = camera_info.get('resolution')
+                    if isinstance(user_res, (tuple, list)) and len(user_res) >= 2:
+                        target_w, target_h = int(user_res[0]), int(user_res[1])
+                    else:
+                        target_w, target_h = 1920, 1080
+                    
+                    # Use new MJPEG-preferring format selection
+                    try:
+                        best_fmt, qt_selected_fps = _select_best_camera_format(dev, target_w, target_h, user_fps)
+                        if best_fmt is not None:
+                            cam.setCameraFormat(best_fmt)
                             try:
-                                if all_fmt_log:
-                                    print("Qt camera supported formats:")
-                                    for (w,h,fpsm) in sorted(all_fmt_log, key=lambda t: (t[2], t[0]*t[1]), reverse=True):
-                                        print(f"  - {w}x{h} @ up to {fpsm:.0f}fps")
+                                print(f"Selected Qt camera format: {target_w}x{target_h} @ {qt_selected_fps}fps")
                             except Exception:
                                 pass
-                            if best_fmt is not None:
-                                cam.setCameraFormat(best_fmt)
-                                try:
-                                    print(f"Selected Qt camera format: {best_key[1]}x{best_key[2]} @ {best_key[0]:.0f}fps")
-                                except Exception:
-                                    pass
-                        except Exception as e:
-                            print(f"Warning: could not set Qt camera format: {e}")
-                        sink = QVideoSink()
-                        sess = QMediaCaptureSession()
-                        sess.setCamera(cam)
-                        sess.setVideoSink(sink)
-                        # Connect frame signal
-                        sink.videoFrameChanged.connect(lambda vf, idx=input_number: self._on_qt_camera_frame(idx, vf))
-                        cam.start()
-                        self.qt_cameras[input_number] = cam
-                        self.qt_sessions[input_number] = sess
-                        self.qt_sinks[input_number] = sink
-                        used_qt_camera = True
-                        print(f"Started Qt camera for Input-{input_number}: {target_name}")
+                        else:
+                            print(f"Warning: no camera format found for {target_w}x{target_h} @ {user_fps}fps")
+                            qt_selected_fps = user_fps
+                    except Exception as e:
+                        print(f"Warning: could not set Qt camera format: {e}")
+                        qt_selected_fps = user_fps
+
+                    try:
+                        if not hasattr(self, '_qt_camera_target_fps'):
+                            self._qt_camera_target_fps = {}
+                        if not hasattr(self, '_qt_camera_target_res'):
+                            self._qt_camera_target_res = {}
+                        self._qt_camera_target_fps[int(input_number)] = int(qt_selected_fps)
+                        self._qt_camera_target_res[int(input_number)] = (int(target_w), int(target_h))
+                    except Exception:
+                        pass
+                    sink = QVideoSink()
+                    sess = QMediaCaptureSession()
+                    sess.setCamera(cam)
+                    sess.setVideoSink(sink)
+                    # Connect camera sink to frame converter worker (off-main-thread)
+                    # Also track raw delivery rate directly on the GUI thread for diagnostics.
+                    sink.videoFrameChanged.connect(lambda vf, idx=input_number: self._on_qt_sink_frame(idx, vf))
+                    cam.start()
+                    self.qt_cameras[input_number] = cam
+                    self.qt_sessions[input_number] = sess
+                    self.qt_sinks[input_number] = sink
+                    used_qt_camera = True
+                    print(f"Started Qt camera for Input-{input_number}: {target_name}")
                 except Exception as e:
                     print(f"Qt camera start failed, falling back to OpenCV: {e}")
 
             if not used_qt_camera:
-                # Create capture using the backend that worked during detection; try fallbacks
-                be_pref = int(camera_info.get('backend', 0)) if isinstance(camera_info, dict) else 0
-                index = int(camera_info.get('index', 0))
-                tried = []
-                def try_open(backend):
-                    cap_local = cv2.VideoCapture(index, backend) if backend != 0 else cv2.VideoCapture(index)
-                    tried.append(backend)
-                    return cap_local if cap_local.isOpened() else None
-                cap = None
-                if be_pref:
-                    cap = try_open(be_pref)
-                if cap is None and system == "Darwin":
-                    cap = try_open(cv2.CAP_AVFOUNDATION)
-                if cap is None:
-                    cap = try_open(0)
-                if cap is None:
-                    raise RuntimeError(f"Failed to open camera index {index} with backends {tried}")
-                
-                # Configure camera resolution only if explicitly provided; do NOT force FPS
-                if isinstance(camera_info, dict):
-                    # Only set resolution if provided; avoid forcing FPS to honor device timing
+                # TRY OBS-STYLE PIPELINE FIRST (if available)
+                if self.obs_camera_pipeline_enabled:
                     try:
-                        res_str = camera_info.get('resolution', '')
-                        if 'x' in res_str:
-                            w, h = map(int, res_str.split('x'))
-                            cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-                            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-                        # Do not set CAP_PROP_FPS unless user explicitly overrides
+                        # Extract camera parameters
+                        index = int(camera_info.get('index', 0))
+                        user_res = camera_info.get('resolution')
+                        if isinstance(user_res, (tuple, list)) and len(user_res) >= 2:
+                            width, height = int(user_res[0]), int(user_res[1])
+                        else:
+                            width, height = 1920, 1080
+                        
+                        user_fps = int(camera_info.get('fps', 60))
                         user_fps_override = app_config.get(f'camera.input{input_number}.fps_override', None)
                         if user_fps_override and user_fps_override > 0:
-                            cap.set(cv2.CAP_PROP_FPS, int(user_fps_override))
-                            print(f"Using user FPS override: {int(user_fps_override)}fps")
+                            user_fps = int(user_fps_override)
                         
-                        # Apply the same optimizations as in detection
+                        # Create OBS-style camera manager (CameraWorker + RenderThread + FrameBuffer)
+                        camera_mgr = SignaledCameraManager(
+                            input_number=input_number,
+                            parent=self,
+                            device=index,
+                            width=width,
+                            height=height,
+                            fps=user_fps
+                        )
+                        
+                        # Connect manager's frame_ready signal to our frame handler
+                        # The render thread emits BGR frames (from OpenCV)
+                        camera_mgr.signals.frame_ready.connect(
+                            lambda in_num, frame, mgr_ref=camera_mgr: self._on_obs_camera_frame(in_num, frame),
+                            type=Qt.ConnectionType.QueuedConnection
+                        )
+                        
+                        # Connect error signal
+                        camera_mgr.signals.camera_error.connect(
+                            lambda in_num, msg: print(f"[Camera-{in_num}] Error: {msg}"),
+                            type=Qt.ConnectionType.QueuedConnection
+                        )
+                        
+                        # Connect FPS update signal
+                        camera_mgr.signals.fps_updated.connect(
+                            lambda in_num, fps: self._on_obs_camera_fps_updated(in_num, fps),
+                            type=Qt.ConnectionType.QueuedConnection
+                        )
+                        
+                        # Start the pipeline threads
+                        camera_mgr.start()
+                        
+                        # Set OS-level thread priorities (prevent preemption)
+                        # This eliminates FPS spikes from UI repaints and other system tasks
                         try:
-                            # Disable auto-exposure for consistent FPS
-                            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
-                            # Set buffer size to 1 to reduce latency and frame drops
-                            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                            # Use MJPEG codec for better performance
-                            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M','J','P','G'))
+                            from PyQt6.QtCore import QThread
+                            camera_mgr.camera_worker.setPriority(QThread.Priority.HighPriority)
+                            camera_mgr.render_thread.setPriority(QThread.Priority.TimeCriticalPriority)
                         except Exception as e:
-                            print(f"    Warning: Could not set camera optimizations: {e}")
+                            print(f"[WARNING] Could not set thread priorities: {e}")
                         
-                        # Report what the driver says now (may be 0/NaN on some backends)
-                        actual_fps = cap.get(cv2.CAP_PROP_FPS)
-                        actual_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-                        actual_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-                        print(f"OpenCV reports: {actual_w}x{actual_h} @ {actual_fps}fps")
+                        # Store manager
+                        self.camera_managers[input_number] = camera_mgr
+                        used_obs_pipeline = True
+                        
+                        print(f"Started OBS-style camera pipeline for Input-{input_number}")
+                        print(f"  Device: {index}, Resolution: {width}x{height}, FPS: {user_fps}")
+                        print(f"  Using dedicated CameraWorker + RenderThread with nanosecond-precision timing")
+                        
                     except Exception as e:
-                        print(f"Warning: Could not configure camera properties: {e}")
+                        print(f"[OBS Camera Pipeline] Failed to initialize: {e}")
+                        print(f"  Falling back to legacy OpenCV timer-based capture")
+                        # Fall through to legacy OpenCV path
+                        self.obs_camera_pipeline_enabled = False
                 
-                self.camera_captures[input_number] = cap
-                self.input_camera_indices[input_number] = int(camera_info.get('index', 0))
+                # FALLBACK: Legacy OpenCV timer-based capture (if OBS pipeline failed/disabled)
+                if not self.obs_camera_pipeline_enabled or input_number not in self.camera_managers:
+                    # Create capture using the backend that worked during detection; try fallbacks
+                    be_pref = int(camera_info.get('backend', 0)) if isinstance(camera_info, dict) else 0
+                    index = int(camera_info.get('index', 0))
+                    tried = []
+                    def try_open(backend):
+                        cap_local = cv2.VideoCapture(index, backend) if backend != 0 else cv2.VideoCapture(index)
+                        tried.append(backend)
+                        return cap_local if cap_local.isOpened() else None
+                    cap = None
+                    if be_pref:
+                        cap = try_open(be_pref)
+                    if cap is None and system == "Darwin":
+                        cap = try_open(cv2.CAP_AVFOUNDATION)
+                    if cap is None and system == "Windows":
+                        cap = try_open(cv2.CAP_DSHOW)  # DirectShow often works better for USB cameras
+                    if cap is None:
+                        cap = try_open(0)
+                    if cap is None:
+                        raise RuntimeError(f"Failed to open camera index {index} with backends {tried}")
+                    
+                    # Configure camera resolution only if explicitly provided; do NOT force FPS
+                    if isinstance(camera_info, dict):
+                        # Extract requested settings
+                        res = camera_info.get('resolution')
+                        if res:
+                            if isinstance(res, (tuple, list)) and len(res) >= 2:
+                                requested_w, requested_h = int(res[0]), int(res[1])
+                            elif isinstance(res, str) and 'x' in res:
+                                requested_w, requested_h = map(int, res.split('x'))
+                            else:
+                                requested_w = requested_h = 0
+                        else:
+                            requested_w = requested_h = 0
+                        
+                        requested_fps = camera_info.get('fps', 60)
+                        user_fps_override = app_config.get(f'camera.input{input_number}.fps_override', None)
+                        if user_fps_override and user_fps_override > 0:
+                            requested_fps = int(user_fps_override)
+                        else:
+                            requested_fps = int(requested_fps)
+                        
+                        # **CRITICAL ORDER on Windows DSHOW**: Codec FIRST, then resolution, then FPS, then buffer
+                        # Without this order, cameras silently cap at 30fps even if they support 120fps
+                        try:
+                            # 1. Set MJPEG codec FIRST (enables 60fps+ on most cameras)
+                            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                            print(f"[CAMERA] Set codec: MJPG")
+                        except Exception as e:
+                            print(f"[CAMERA] Warning: Could not set MJPG codec: {e}")
+                        
+                        try:
+                            # 2. Then set resolution
+                            if requested_w > 0 and requested_h > 0:
+                                cap.set(cv2.CAP_PROP_FRAME_WIDTH, requested_w)
+                                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, requested_h)
+                                print(f"[CAMERA] Set resolution: {requested_w}x{requested_h}")
+                        except Exception as e:
+                            print(f"[CAMERA] Warning: Could not set resolution: {e}")
+                        
+                        try:
+                            # 3. Then set FPS
+                            cap.set(cv2.CAP_PROP_FPS, requested_fps)
+                            print(f"[CAMERA] Set FPS: {requested_fps}")
+                        except Exception as e:
+                            print(f"[CAMERA] Warning: Could not set FPS: {e}")
+                        
+                        try:
+                            # 4. Critical: buffer size 1 to prevent stale frame queue at high fps
+                            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                            print(f"[CAMERA] Set buffer size: 1")
+                        except Exception as e:
+                            print(f"[CAMERA] Warning: Could not set buffer size: {e}")
+                        
+                        try:
+                            # Verify what the camera actually accepted
+                            actual_fps = cap.get(cv2.CAP_PROP_FPS)
+                            actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                            actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                            print(f"[CAMERA] Requested: {requested_w}x{requested_h} @ {requested_fps}fps")
+                            print(f"[CAMERA] Actual    : {actual_w}x{actual_h} @ {actual_fps}fps")
+                            if actual_fps < requested_fps:
+                                print(f"[CAMERA] ⚠ Hardware limit detected: camera delivers {actual_fps}fps, "
+                                      f"render thread will duplicate frames to output {requested_fps}fps")
+                        except Exception as e:
+                            print(f"[CAMERA] Warning: Could not verify camera properties: {e}")
+                    
+                    self.camera_captures[input_number] = cap
+                    self.input_camera_indices[input_number] = int(camera_info.get('index', 0))
+                    
+                    # Create timer for frame updates (legacy path only)
+                    timer = QTimer()
+                    timer.timeout.connect(lambda: self.update_camera_frame(input_number))
+                    if isinstance(camera_info, dict):
+                        detected_fps = camera_info.get('fps', 60)
+                        user_fps_override = app_config.get(f'camera.input{input_number}.fps_override', None)
+                        if user_fps_override and user_fps_override > 0:
+                            camera_fps = min(user_fps_override, detected_fps)
+                        else:
+                            camera_fps = detected_fps
+                    else:
+                        camera_fps = 60
+                    
+                    interval_ms = max(4, int(1000 / camera_fps))
+                    timer.start(interval_ms)
+                    print(f"Camera timer set to {interval_ms}ms intervals ({camera_fps}fps)")
+                    self.camera_timers[input_number] = timer
+                    # Update graphics and preview config to match this non-Qt camera rate
+                    if hasattr(self, '_graphics_output'):
+                        self._graphics_output.set_target_fps(int(camera_fps))
+                    app_config.set('ui.preview_fps', int(camera_fps))
+                    app_config.save_settings()
             
-            # Create timer for frame updates
-            timer = QTimer()
+            # Qt camera path continues here
             if used_qt_camera:
-                # With Qt/PyAV cameras, frames arrive via signal; no polling required
-                timer.timeout.connect(lambda: None)
-            else:
-                timer.timeout.connect(lambda: self.update_camera_frame(input_number))
-            # Use camera's configured FPS (which may be user-overridden). For Qt path, rely on runtime measurement.
-            if used_qt_camera:
-                # Start a light idle timer; frame updates come via signal
+                # Create idle timer for Qt camera (signal-driven, but keep timer for lifecycle)
+                timer = QTimer()  # Initialize timer (was scoped bug if not done here)
+                timer.timeout.connect(lambda: None)  # No-op, frames arrive via signal
                 timer.start(1000)  # 1s no-op
                 print("Qt camera uses signal-driven frames; timer is idle.")
                 self.camera_timers[input_number] = timer
+                # Apply FPS to output pipeline - use format's actual fps to avoid throttling (e.g. 60 not 30)
+                camera_fps = int(qt_selected_fps)
+                
+                if hasattr(self, '_graphics_output') and self._graphics_output is not None:
+                    self._graphics_output.set_target_fps(camera_fps)
+                app_config.set('ui.preview_fps', camera_fps)
+                app_config.save_settings()
+                try:
+                    if FPS_CONTROLLER_AVAILABLE:
+                        from fps_controller import set_global_fps
+                        set_global_fps(camera_fps)
+                except Exception:
+                    pass
+                QTimer.singleShot(100, lambda f=camera_fps: self._safe_set_fps_combo(f))
+                print(f"Applied {camera_fps}fps to output pipeline (from camera selection)")
             else:
                 if isinstance(camera_info, dict):
                     detected_fps = camera_info.get('fps', 60)
@@ -3258,76 +6668,271 @@ class GoLiveStudio(QMainWindow):
                         camera_fps = detected_fps
                 else:
                     camera_fps = 60
-                interval_ms = max(4, int(1000 / camera_fps))
-                timer.start(interval_ms)
-                print(f"Camera timer set to {interval_ms}ms intervals ({camera_fps}fps)")
-                self.camera_timers[input_number] = timer
+
+                if timer is not None:
+                    interval_ms = max(4, int(1000 / camera_fps))
+                    timer.start(interval_ms)
+                    print(f"Camera timer set to {interval_ms}ms intervals ({camera_fps}fps)")
+                    self.camera_timers[input_number] = timer
+
                 # Update graphics and preview config to match this non-Qt camera rate
                 if hasattr(self, '_graphics_output'):
                     self._graphics_output.set_target_fps(int(camera_fps))
                 app_config.set('ui.preview_fps', int(camera_fps))
                 app_config.save_settings()
             
+            try:
+                if not hasattr(self, '_input_camera_name'):
+                    self._input_camera_name = {}
+                self._input_camera_name[int(input_number)] = str(camera_info.get('name', '') or '')
+            except Exception:
+                pass
+            try:
+                if hasattr(self, '_update_input_footer'):
+                    self._update_input_footer(int(input_number))
+            except Exception:
+                pass
+
             print(f"Started camera capture for Input-{input_number}: {camera_info['name']}")
             
         except Exception as e:
             print(f"Error starting camera capture: {e}")
     
     def update_camera_frame(self, input_number):
-        """Update camera frame in the video widget"""
+        """Offload camera frame capture to thread pool and update UI via signal."""
         import cv2
+        if not hasattr(self, 'camera_captures') or input_number not in self.camera_captures:
+            return
+
+        # OBS-style: never allow capture ticks to backlog.
+        # If a previous read is still in-flight, drop this tick.
         try:
-            # Update the current source in graphics output if this camera is on program
-            if hasattr(self, '_graphics_output') and hasattr(self, 'outputSource') and \
-               self.outputSource == 'input' and self.outputSourceIndex == input_number:
-                self._graphics_output._current_source = {'type': 'input', 'index': input_number}
-            if not hasattr(self, 'camera_captures') or input_number not in self.camera_captures:
+            if not hasattr(self, '_opencv_read_pending'):
+                self._opencv_read_pending = {}
+            if self._opencv_read_pending.get(int(input_number), False):
+                return
+            self._opencv_read_pending[int(input_number)] = True
+        except Exception:
+            pass
+
+        cap = self.camera_captures[input_number]
+        # Use thread pool for capture
+        def capture_task():
+            try:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    return (False, None)
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                return (True, rgb_frame)
+            except Exception as e:
+                print(f"Camera read failed for input {input_number}: {e}")
+                return (False, None)
+        def on_done(fut):
+            try:
+                ret, rgb_frame = fut.result()
+            except Exception:
+                ret, rgb_frame = False, None
+
+            try:
+                if hasattr(self, '_opencv_read_pending'):
+                    self._opencv_read_pending[int(input_number)] = False
+            except Exception:
+                pass
+
+            if ret:
+                self.camera_frame_ready.emit(input_number, rgb_frame)
+        # Submit to thread pool
+        if thread_pool:
+            fut = thread_pool.submit_task(capture_task)
+            if fut:
+                fut.add_done_callback(on_done)
+            else:
+                try:
+                    if hasattr(self, '_opencv_read_pending'):
+                        self._opencv_read_pending[int(input_number)] = False
+                except Exception:
+                    pass
+        else:
+            # Fallback: run synchronously (should not happen)
+            ret, rgb_frame = capture_task()
+            try:
+                if hasattr(self, '_opencv_read_pending'):
+                    self._opencv_read_pending[int(input_number)] = False
+            except Exception:
+                pass
+            self.camera_frame_ready.emit(input_number, rgb_frame)
+
+    def _on_obs_camera_frame(self, input_number, bgr_frame):
+        """
+        Handle frames from OBS-style camera pipeline.
+        Frames come from render thread (BGR format from OpenCV).
+        Converts BGR to RGB and processes them like regular capture frames.
+        """
+        try:
+            if bgr_frame is None:
                 return
             
-            cap = self.camera_captures[input_number]
-            ret, frame = cap.read()
+            import cv2
+            # Convert BGR (from OpenCV) to RGB (for Qt display)
+            rgb_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
             
-            if ret:
-                # Convert BGR to RGB
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                height, width, channel = rgb_frame.shape
-                bytes_per_line = 3 * width
-                
-                # Create QImage
-                q_image = QImage(rgb_frame.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
-                
-                # Convert to QPixmap
-                pixmap = QPixmap.fromImage(q_image)
-                # Cache original image for high-quality output scaling
-                self.last_input_image[input_number] = q_image.copy()
-                
-                # Get the video widget (AspectRatioFrame) by correct object name
-                # The UI uses names: inputVideoFrame1, inputVideoFrame2, inputVideoFrame3
+            # Process frame through the standard camera frame handler
+            self._on_camera_frame_ready(input_number, rgb_frame)
+        except Exception as e:
+            print(f"[OBS Camera] Frame processing error for input {input_number}: {e}")
+    
+    def _on_obs_camera_fps_updated(self, input_number, fps):
+        """Handle FPS updates from OBS camera pipeline (useful for adaptive quality)."""
+        try:
+            # Could adapt quality or update UI based on measured FPS
+            if hasattr(self, 'quality_manager'):
+                # Optionally: adjust quality based on camera FPS
+                pass
+        except Exception:
+            pass
+
+    def _on_camera_frame_ready(self, input_number, rgb_frame):
+        """Update the UI with the captured frame (runs on main thread)."""
+        try:
+            from PyQt6.QtGui import QImage, QPixmap
+            from PyQt6.QtCore import QSize, Qt
+            if rgb_frame is None:
+                return
+            height, width, channel = rgb_frame.shape
+            bytes_per_line = 3 * width
+            q_image = QImage(rgb_frame.data, width, height, bytes_per_line, QImage.Format.Format_RGB888).copy()
+            
+            # Cache original raw frame (without effects) for scaling and use by graphics output
+            # Effects will be applied by graphics output widget during rendering AND by streaming
+            try:
+                self.last_input_image[input_number] = q_image
+            except Exception:
+                pass
+            # Convert to QPixmap and scale to widget
+            pixmap = QPixmap.fromImage(q_image)
+            try:
                 video_widget = getattr(self, f'inputVideoFrame{input_number}')
-                
-                # Scale pixmap to fit widget while maintaining aspect ratio
+            except Exception:
+                video_widget = None
+            if video_widget is not None:
                 widget_size = video_widget.size()
-                # Fallback to minimum size if current size is not yet laid out
                 if widget_size.width() <= 1 or widget_size.height() <= 1:
                     min_size = video_widget.minimumSize()
                     widget_size = min_size if min_size.isValid() else QSize(320, 180)
                 if widget_size.width() > 0 and widget_size.height() > 0:
                     scaled_pixmap = pixmap.scaled(
-                        widget_size, 
-                        Qt.AspectRatioMode.KeepAspectRatio, 
+                        widget_size,
+                        Qt.AspectRatioMode.KeepAspectRatio,
                         Qt.TransformationMode.SmoothTransformation
                     )
-                    
-                    # For AspectRatioFrame, set the pixmap on its label
+                else:
+                    scaled_pixmap = pixmap
+                if hasattr(video_widget, 'label'):
+                    video_widget.label.setPixmap(scaled_pixmap)
+                else:
+                    if hasattr(video_widget, '_video_label'):
+                        video_widget._video_label.setPixmap(scaled_pixmap)
+                    else:
+                        try:
+                            from PyQt6.QtWidgets import QLabel, QVBoxLayout, QSizePolicy
+                            video_widget._video_label = QLabel(video_widget)
+                            if not video_widget.layout():
+                                layout = QVBoxLayout(video_widget)
+                                layout.setContentsMargins(0, 0, 0, 0)
+                                video_widget.setLayout(layout)
+                            video_widget._video_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+                            video_widget.layout().addWidget(video_widget._video_label)
+                            video_widget._video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                            video_widget._video_label.setScaledContents(True)
+                        except Exception:
+                            pass
+                        video_widget._video_label.setPixmap(scaled_pixmap)
+                try:
+                    self.last_input_pixmap[input_number] = scaled_pixmap
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # If currently selected as output, update main output image
+        try:
+            if not getattr(self, '_transition_running', False) and self.current_output == ('input', input_number):
+                self._set_output_image(self.last_input_image.get(input_number))
+        except Exception:
+            pass
+        # Update live preview monitor if active
+        try:
+            if hasattr(self, 'active_preview_source') and self.active_preview_source == ('input', input_number):
+                self._update_preview_monitor(self.last_input_image.get(input_number), 'input', int(input_number))
+        except Exception:
+            pass
+
+    def _apply_read_result(self, input_number):
+        """Apply the result of a background camera read to the UI."""
+        try:
+            fut = None
+            if hasattr(self, '_camera_read_futures'):
+                fut = self._camera_read_futures.pop(input_number, None)
+
+            ret = False
+            frame = None
+
+            # If fallback stored a tuple (ret, frame)
+            if isinstance(fut, tuple) and len(fut) == 2:
+                ret, frame = fut
+            else:
+                # If it's a Future-like object, attempt to get result
+                try:
+                    if fut is not None and hasattr(fut, 'result'):
+                        res = fut.result(timeout=0)
+                        if isinstance(res, tuple) and len(res) == 2:
+                            ret, frame = res
+                except Exception:
+                    ret, frame = False, None
+
+            if not ret or frame is None:
+                return
+
+            import cv2
+            from PyQt6.QtGui import QImage, QPixmap
+            from PyQt6.QtCore import QSize, Qt
+
+            # Convert BGR to RGB and create an owned QImage copy
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            height, width, channel = rgb_frame.shape
+            bytes_per_line = 3 * width
+            q_image = QImage(rgb_frame.data, width, height, bytes_per_line, QImage.Format.Format_RGB888).copy()
+
+            # Cache original image for high-quality output scaling
+            try:
+                self.last_input_image[input_number] = q_image
+            except Exception:
+                pass
+
+            # Convert to QPixmap and scale to widget
+            pixmap = QPixmap.fromImage(q_image)
+            try:
+                video_widget = getattr(self, f'inputVideoFrame{input_number}')
+            except Exception:
+                video_widget = None
+
+            if video_widget is not None:
+                widget_size = video_widget.size()
+                if widget_size.width() <= 1 or widget_size.height() <= 1:
+                    min_size = video_widget.minimumSize()
+                    widget_size = min_size if min_size.isValid() else QSize(320, 180)
+                if widget_size.width() > 0 and widget_size.height() > 0:
+                    scaled_pixmap = pixmap.scaled(
+                        widget_size,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation
+                    )
                     if hasattr(video_widget, 'label'):
                         video_widget.label.setPixmap(scaled_pixmap)
                     else:
-                        # Fallback - try to set pixmap directly or use stylesheet
-                        if hasattr(video_widget, 'setPixmap'):
-                            video_widget.setPixmap(scaled_pixmap)
+                        if hasattr(video_widget, '_video_label'):
+                            video_widget._video_label.setPixmap(scaled_pixmap)
                         else:
-                            # Create a label inside the frame if it doesn't exist
-                            if not hasattr(video_widget, '_video_label'):
+                            try:
                                 from PyQt6.QtWidgets import QLabel, QVBoxLayout, QSizePolicy
                                 video_widget._video_label = QLabel(video_widget)
                                 if not video_widget.layout():
@@ -3338,17 +6943,31 @@ class GoLiveStudio(QMainWindow):
                                 video_widget.layout().addWidget(video_widget._video_label)
                                 video_widget._video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                                 video_widget._video_label.setScaledContents(True)
-                            
-                            video_widget._video_label.setPixmap(scaled_pixmap)
+                                video_widget._video_label.setPixmap(scaled_pixmap)
+                            except Exception:
+                                pass
 
-                    # Store last pixmap and update output if selected
-                    self.last_input_pixmap[input_number] = scaled_pixmap
-                    if not getattr(self, '_transition_running', False) and self.current_output == ('input', input_number):
-                        # Use original for output to avoid double-scaling loss
-                        self._set_output_image(self.last_input_image[input_number])
-                    
+                    try:
+                        self.last_input_pixmap[input_number] = scaled_pixmap
+                    except Exception:
+                        pass
+
+            # If currently selected as output, update main output image
+            try:
+                if not getattr(self, '_transition_running', False) and self.current_output == ('input', input_number):
+                    self._set_output_image(self.last_input_image.get(input_number))
+            except Exception:
+                pass
+
+            # Update live preview monitor if active
+            try:
+                if hasattr(self, 'active_preview_source') and self.active_preview_source == ('input', input_number):
+                    self._update_preview_monitor(self.last_input_image.get(input_number), 'input', int(input_number))
+            except Exception:
+                pass
+
         except Exception as e:
-            print(f"Error updating camera frame for input {input_number}: {e}")
+            print(f"Error applying camera read result for input {input_number}: {e}")
     
     def _on_avf_frame(self, input_number: int, qimg: QImage, measured_fps: float):
         """Handle frames from AVFoundation (PyAV) capture."""
@@ -3400,6 +7019,13 @@ class GoLiveStudio(QMainWindow):
             if not getattr(self, '_transition_running', False) and self.current_output == ('input', input_number):
                 self._set_output_image(self.last_input_image[input_number])
 
+            # Live preview monitor update (use full-res cached image)
+            try:
+                if hasattr(self, 'active_preview_source') and self.active_preview_source == ('input', int(input_number)):
+                    self._update_preview_monitor(self.last_input_image.get(int(input_number)), 'input', int(input_number))
+            except Exception:
+                pass
+
             # Runtime FPS adaptation (same policy as Qt path)
             try:
                 measured = float(measured_fps or 0.0)
@@ -3411,6 +7037,7 @@ class GoLiveStudio(QMainWindow):
                     # Use FPS stabilizer to prevent excessive updates
                     should_update, stable_fps = fps_manager.update_component_fps(f'input_{input_number}', measured)
                     if should_update:
+                        stable_fps = max(24, stable_fps)  # Minimum 24 FPS to prevent lag
                         print(f"Input-{input_number} FPS stabilized at {stable_fps}fps (was {measured:.1f}fps)")
                         if getattr(self, 'current_output', (None, None)) == ('input', input_number):
                             if hasattr(self, '_graphics_output'):
@@ -3431,163 +7058,540 @@ class GoLiveStudio(QMainWindow):
             print(f"AVF camera frame error (Input-{input_number}): {e}")
 
     def _on_qt_camera_frame(self, input_number, video_frame):
-        """Handle frames from Qt camera (QVideoSink) for the given input. Also measure actual FPS."""
+        """
+        GUI thread handler for camera frames.
+        DIAGNOSTIC: Measure raw frame delivery rate from Qt/camera layer.
+        """
         try:
-            img = video_frame.toImage()
-            if img is None or img.isNull():
-                print(f"⚠️ Input-{input_number}: Received null/empty frame")
+            if not video_frame.isValid():
                 return
             
-            # Debug: Only log first few frames to avoid spam
-            if not hasattr(self, '_frame_count'):
-                self._frame_count = {}
-            if input_number not in self._frame_count:
-                self._frame_count[input_number] = 0
-            self._frame_count[input_number] += 1
-            if self._frame_count[input_number] <= 3:
-                print(f"📹 Input-{input_number}: Received frame {img.width()}x{img.height()}")
-            # FPS measurement using arrival timestamps
+            # MEASUREMENT: Track raw frame delivery (NOT processing time)
+            if not hasattr(self, '_raw_frame_count'):
+                self._raw_frame_count = {}
+                self._raw_fps_clock = {}
+            
+            if input_number not in self._raw_frame_count:
+                self._raw_frame_count[input_number] = 0
+                self._raw_fps_clock[input_number] = time.perf_counter()
+            
+            self._raw_frame_count[input_number] += 1
+            now = time.perf_counter()
+            elapsed = now - self._raw_fps_clock[input_number]
+            
+            if elapsed >= 1.0:
+                raw_fps = self._raw_frame_count[input_number] / elapsed
+                print(f"[RAW-CAMERA-SIGNAL] Input-{input_number} Qt signal delivery rate: {raw_fps:.1f}fps")
+                self._raw_frame_count[input_number] = 0
+                self._raw_fps_clock[input_number] = now
+            
+            # Hand off to worker for processing
+            worker = self._get_or_create_frame_worker(input_number)
+            worker.process_video_frame(video_frame, input_number)
+            
+        except Exception as e:
+            pass  # Never let camera errors crash the GUI thread
+
+    def _on_qt_sink_frame(self, input_number: int, video_frame: 'QVideoFrame'):
+        try:
+            if video_frame is None or not video_frame.isValid():
+                return
+
+            if not hasattr(self, '_qt_sink_fps'):
+                self._qt_sink_fps = {}
+            st = self._qt_sink_fps.get(int(input_number))
+            if st is None:
+                st = {'count': 0, 'clock': time.perf_counter()}
+                self._qt_sink_fps[int(input_number)] = st
+            st['count'] += 1
+            now = time.perf_counter()
+            elapsed = now - st['clock']
+            if elapsed >= 1.0:
+                fps = st['count'] / elapsed
+                st['count'] = 0
+                st['clock'] = now
+                print(f"[QT-SINK] Input-{input_number} delivery rate: {fps:.1f}fps")
+
+            # OBS-style: never let the capture callback flood the event queue.
+            # Keep only the latest frame per input and schedule at most one dispatch at a time.
+            if not hasattr(self, '_qt_latest_vf'):
+                self._qt_latest_vf = {}
+            if not hasattr(self, '_qt_vf_dispatch_pending'):
+                self._qt_vf_dispatch_pending = set()
+
             try:
-                import time
-                if hasattr(self, '_fps_measure') and input_number in self._fps_measure:
-                    rec = self._fps_measure[input_number]
-                    now = time.time()
-                    rec['times'].append(now)
-                    # Compute instantaneous FPS over last ~1s
-                    if len(rec['times']) >= 5:
-                        t0 = rec['times'][0]
-                        t1 = rec['times'][-1]
-                        dt = max(1e-3, t1 - t0)
-                        measured = (len(rec['times']) - 1) / dt
-                        rec['measured_fps'] = measured
-                        # If measured FPS is much lower than device capability, auto-correct by switching format once
-                        try:
-                            if measured < 25.0:
-                                cam = self.qt_cameras.get(input_number)
-                                sess = self.qt_sessions.get(input_number)
-                                sink = self.qt_sinks.get(input_number)
-                                if cam is not None and sess is not None and sink is not None:
-                                    dev = cam.cameraDevice()
-                                    # Find highest-FPS format again
-                                    best_fmt = None
-                                    best_key = (-1.0, 0, 0)
-                                    for fmt in dev.videoFormats():
-                                        try:
-                                            fps_max = float(fmt.maxFrameRate())
-                                        except Exception:
-                                            fps_max = 0.0
-                                        size = fmt.resolution()
-                                        w = int(size.width()) if hasattr(size, 'width') else int(getattr(size, 'width', 0))
-                                        h = int(size.height()) if hasattr(size, 'height') else int(getattr(size, 'height', 0))
-                                        key = (fps_max, w, h)
-                                        if (key > best_key) or (abs(fps_max - best_key[0]) < 0.1 and (w, h) == (1920, 1080)):
-                                            best_key = key
-                                            best_fmt = fmt
-                                    if best_fmt is not None and best_key[0] >= 50.0:
-                                        # Apply format and restart camera once
-                                        try:
-                                            print(f"Measured {measured:.1f}fps; switching to {best_key[1]}x{best_key[2]} @ {best_key[0]:.0f}fps")
-                                        except Exception:
-                                            pass
-                                        cam.stop()
-                                        cam.setCameraFormat(best_fmt)
-                                        cam.start()
-                                        # Reset measurement buffer after switch
-                                        rec['times'].clear()
-                        except Exception:
-                            pass
-                        # Throttle logs/updates to ~2 Hz
-                        if now - rec.get('last_report', 0.0) > 0.5:
-                            rec['last_report'] = now
-                            # Use FPS stabilizer for Qt camera
-                            should_update, stable_fps = fps_manager.update_component_fps(f'qt_input_{input_number}', measured)
-                            if should_update:
-                                print(f"Input-{input_number} FPS stabilized at {stable_fps}fps (measured: {measured:.1f}fps)")
-                                app_config.set('ui.preview_fps', stable_fps)
-                                app_config.save_settings()
-                                if getattr(self, 'current_output', (None, None)) == ('input', input_number):
-                                    if hasattr(self, '_graphics_output'):
-                                        self._graphics_output.set_target_fps(stable_fps)
-                                # Also update external mirror FPS live if running
-                                try:
-                                    if hasattr(self, 'mirror_controller') and self.mirror_controller and self.mirror_controller.is_running():
-                                        self.mirror_controller.update({'fps': stable_fps})
-                                except Exception:
-                                    pass
-                                # Also update any running streams to the same FPS
-                                try:
-                                    if hasattr(self, 'stream_controllers'):
-                                        for sc in self.stream_controllers.values():
-                                            try:
-                                                if sc.is_running():
-                                                    sc.set_fps(stable_fps)
-                                            except Exception:
-                                                pass
-                                except Exception:
-                                    pass
+                self._qt_latest_vf[int(input_number)] = QVideoFrame(video_frame)
+            except Exception:
+                self._qt_latest_vf[int(input_number)] = video_frame
+
+            if int(input_number) not in self._qt_vf_dispatch_pending:
+                self._qt_vf_dispatch_pending.add(int(input_number))
+                QTimer.singleShot(0, lambda idx=int(input_number): self._dispatch_latest_qt_video_frame(idx))
+        except Exception:
+            try:
+                QMetaObject.invokeMethod(
+                    self._converter_worker,
+                    'convert_frame',
+                    Qt.ConnectionType.QueuedConnection,
+                    Q_ARG(int, int(input_number)),
+                    Q_ARG(QVideoFrame, video_frame)
+                )
             except Exception:
                 pass
-            # Ensure caches
+
+    def _dispatch_latest_qt_video_frame(self, input_number: int):
+        try:
+            if hasattr(self, '_qt_vf_dispatch_pending'):
+                self._qt_vf_dispatch_pending.discard(int(input_number))
+
+            if not hasattr(self, '_qt_latest_vf'):
+                return
+
+            vf = self._qt_latest_vf.pop(int(input_number), None)
+            if vf is None or not vf.isValid():
+                return
+
+            QMetaObject.invokeMethod(
+                self._converter_worker,
+                'convert_frame',
+                Qt.ConnectionType.QueuedConnection,
+                Q_ARG(int, int(input_number)),
+                Q_ARG(QVideoFrame, vf)
+            )
+
+            # If another frame arrived while we were dispatching, schedule again.
+            if int(input_number) in getattr(self, '_qt_latest_vf', {}):
+                if int(input_number) not in getattr(self, '_qt_vf_dispatch_pending', set()):
+                    self._qt_vf_dispatch_pending.add(int(input_number))
+                    QTimer.singleShot(0, lambda idx=int(input_number): self._dispatch_latest_qt_video_frame(idx))
+        except Exception:
+            pass
+    
+    def _get_or_create_frame_worker(self, input_number):
+        """Get or create a frame processing worker for the given input."""
+        if input_number not in self._frame_workers:
+            self._frame_workers[input_number] = FrameProcessingWorker(
+                input_number,
+                on_frame_ready_callback=self._on_camera_frame_processed
+            )
+        return self._frame_workers[input_number]
+    
+    def _on_camera_frame_processed(self, input_number, frame_numpy):
+        """
+        Called from FrameProcessingWorker thread with processed numpy frame.
+        This does what _process_qt_camera_frame_deferred used to do — 
+        frame cache, display update, etc.
+        """
+        try:
+            # Schedule the heavy UI work back on GUI thread via deferred processing
+            if not hasattr(self, '_qt_pending_frames'):
+                self._qt_pending_frames = {}
+            self._qt_pending_frames[input_number] = frame_numpy
+            
+            if not hasattr(self, '_qt_frame_timer_pending'):
+                self._qt_frame_timer_pending = set()
+            if input_number not in self._qt_frame_timer_pending:
+                self._qt_frame_timer_pending.add(input_number)
+                QTimer.singleShot(0, lambda idx=input_number: self._process_frame_on_gui_thread(idx))
+        except Exception:
+            pass
+    
+    def _process_frame_on_gui_thread(self, input_number):
+        """
+        Process frame on GUI thread — this is what _process_qt_camera_frame_deferred did.
+        Now called from _on_camera_frame_processed after worker finishes conversion.
+        """
+        try:
+            self._qt_frame_timer_pending.discard(input_number)
+            frame = self._qt_pending_frames.get(input_number)
+            if frame is None:
+                return
+            
+            # Convert numpy frame to QImage for display
+            import numpy as np
+            if isinstance(frame, np.ndarray):
+                from PyQt6.QtGui import QImage
+                h, w = frame.shape[:2]
+                if len(frame.shape) == 3 and frame.shape[2] == 3:
+                    # RGB numpy → QImage
+                    bytes_per_line = 3 * w
+                    qimg = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+                    qimg = qimg.copy()  # Make a copy so frame_numpy can be freed
+                else:
+                    return
+            else:
+                qimg = frame
+            
+            # PRIORITY 1: Update graphics output FIRST (before any other UI work)
+            try:
+                if hasattr(self, '_graphics_output') and self._graphics_output:
+                    self._graphics_output.set_input_frame(input_number, qimg)
+            except Exception:
+                pass
+            
+            # OPTIMIZATION: Skip heavy processing if this input isn't currently displayed
+            active = getattr(self, 'current_output', None)
+            prev_src = getattr(self, 'active_preview_source', None)
+            is_active = (active and active[0] == 'input' and active[1] == input_number) or \
+                        (prev_src and prev_src[0] == 'input' and prev_src[1] == input_number)
+            
+            # Debug: Log frame info (only for active inputs to reduce spam)
+            if is_active:
+                if not hasattr(self, '_frame_debug_counts'): 
+                    self._frame_debug_counts = {}
+                if input_number not in self._frame_debug_counts: 
+                    self._frame_debug_counts[input_number] = 0
+                self._frame_debug_counts[input_number] += 1
+                
+                if self._frame_debug_counts[input_number] == 1 or self._frame_debug_counts[input_number] % 60 == 0:
+                    print(f"Input-{input_number} Frame #{self._frame_debug_counts[input_number]}: {qimg.width()}x{qimg.height()}")
+            
+            # Evict stale scaled cache entries (prevent memory accumulation)
+            if hasattr(self, 'last_input_image_scaled'):
+                primary_key = None
+                for k in self.last_input_image_scaled:
+                    if k[0] == input_number:
+                        primary_key = k
+                        break
+                keys_to_delete = [k for k in self.last_input_image_scaled 
+                                  if k[0] == input_number and (primary_key is None or k != primary_key)]
+                for k in keys_to_delete:
+                    del self.last_input_image_scaled[k]
+            
+            # Update UI widgets only if input is active
+            if is_active:
+                # Update Input Card Thumbnail
+                video_widget = getattr(self, f"inputVideoFrame{input_number}", None)
+                if video_widget:
+                    try:
+                        if not hasattr(video_widget, '_video_label'):
+                            from PyQt6.QtWidgets import QLabel, QVBoxLayout
+                            video_widget._video_label = QLabel(video_widget)
+                            video_widget._video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                            video_widget._video_label.setStyleSheet("background-color: black;")
+                            if not video_widget.layout():
+                                layout = QVBoxLayout(video_widget)
+                                layout.setContentsMargins(0,0,0,0)
+                                video_widget.setLayout(layout)
+                            video_widget.layout().addWidget(video_widget._video_label)
+                        
+                        thumb_size = video_widget.size()
+                        if thumb_size.width() < 10: 
+                            thumb_size = QSize(320, 180)
+                        
+                        scaled_cache = getattr(self, 'last_input_image_scaled', {})
+                        cached_720p = None
+                        for k in scaled_cache:
+                            if k[0] == input_number:
+                                cached_720p = scaled_cache[k]
+                                break
+                        
+                        if cached_720p is not None and not cached_720p.isNull():
+                            source_for_thumb = cached_720p
+                        else:
+                            source_for_thumb = qimg
+                        
+                        thumb_img = source_for_thumb.scaled(
+                            thumb_size,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.FastTransformation
+                        )
+                        thumb_pix = QPixmap.fromImage(thumb_img)
+                        del thumb_img
+                        video_widget._video_label.setPixmap(thumb_pix)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def _process_qt_camera_frame_deferred(self, input_number):
+        """Process the latest pending frame (coalesced) - prevents buffering by showing only newest.
+        
+        NOTE: Scaling is already done in FrameConverterWorker on background thread.
+        This method just updates UI and evicts stale cache entries.
+        """
+        import time
+        try:
+            self._qt_frame_timer_pending.discard(input_number)
+            img = self._qt_pending_frames.get(input_number)
+            if img is None or img.isNull():
+                return
+            
+            # PRIORITY 1: Update graphics output FIRST (before any other UI work)
+            # Every millisecond of delay here adds to the latency chain
+            try:
+                if hasattr(self, '_graphics_output') and self._graphics_output:
+                    self._graphics_output.set_input_frame(input_number, img)
+            except Exception:
+                pass
+            
+            # OPTIMIZATION: Skip heavy processing if this input isn't currently displayed
+            active = getattr(self, 'current_output', None)
+            prev_src = getattr(self, 'active_preview_source', None)
+            is_active = (active and active[0] == 'input' and active[1] == input_number) or \
+                        (prev_src and prev_src[0] == 'input' and prev_src[1] == input_number)
+            
+            # Debug: Log frame info (only for active inputs to reduce spam)
+            if is_active:
+                if not hasattr(self, '_frame_debug_counts'): 
+                    self._frame_debug_counts = {}
+                if input_number not in self._frame_debug_counts: 
+                    self._frame_debug_counts[input_number] = 0
+                self._frame_debug_counts[input_number] += 1
+                
+                if self._frame_debug_counts[input_number] == 1 or self._frame_debug_counts[input_number] % 60 == 0:
+                    print(f"Input-{input_number} Frame #{self._frame_debug_counts[input_number]}: {img.width()}x{img.height()}")
+            
+            # FIXED: Cache updates on EVERY FRAME (no gating to every 60)
+            if is_active:
+                # Store actual resolution for tracking resolution changes
+                if not hasattr(self, '_prev_input_resolution'):
+                    self._prev_input_resolution = {}
+                # Log diagnosis only once per second to reduce spam
+                if not hasattr(self, '_frame_cache_log_throttle'):
+                    self._frame_cache_log_throttle = {}
+                import time as _cache_time
+                now_cache = _cache_time.monotonic()
+                last_log = self._frame_cache_log_throttle.get(input_number, 0.0)
+                if now_cache - last_log >= 1.0:
+                    print(f"[FRAME_CACHE] Input {input_number}: cached {img.width()}x{img.height()} for streaming (every frame updated)")
+                    self._frame_cache_log_throttle[input_number] = now_cache
+            
+            # Evict stale scaled cache entries (prevent memory accumulation)
+            # Keep only the primary scaled entry for this input (most recent)
+            if hasattr(self, 'last_input_image_scaled'):
+                primary_key = None
+                # Find the most recently updated key for this input
+                for k in self.last_input_image_scaled:
+                    if k[0] == input_number:
+                        primary_key = k
+                        break
+                # Delete all other keys for this input
+                keys_to_delete = [k for k in self.last_input_image_scaled 
+                                  if k[0] == input_number and (primary_key is None or k != primary_key)]
+                for k in keys_to_delete:
+                    del self.last_input_image_scaled[k]
+            
+            # ✅ SLOW PATH: Update UI widgets only if input is active (skip otherwise to save CPU)
+            if not is_active:
+                # Just evict cache, skip widget/display updates for inactive inputs
+                pass
+            else:
+                # 1. Update Input Card Thumbnail (if input is visible in sidebar)
+                video_widget = getattr(self, f"inputVideoFrame{input_number}", None)
+                if video_widget:
+                    try:
+                        if not hasattr(video_widget, '_video_label'):
+                            from PyQt6.QtWidgets import QLabel, QVBoxLayout
+                            video_widget._video_label = QLabel(video_widget)
+                            video_widget._video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                            video_widget._video_label.setStyleSheet("background-color: black;")
+                            if not video_widget.layout():
+                                layout = QVBoxLayout(video_widget)
+                                layout.setContentsMargins(0,0,0,0)
+                                video_widget.setLayout(layout)
+                            video_widget.layout().addWidget(video_widget._video_label)
+                        
+                        # Use pre-scaled cache for thumbnail (avoid scaling on main thread)
+                        thumb_size = video_widget.size()
+                        if thumb_size.width() < 10: 
+                            thumb_size = QSize(320, 180)
+                        
+                        # Find the cached scaled version for this input (any scale size)
+                        scaled_cache = getattr(self, 'last_input_image_scaled', {})
+                        cached_720p = None
+                        for k in scaled_cache:
+                            if k[0] == input_number:
+                                cached_720p = scaled_cache[k]
+                                break
+                        
+                        if cached_720p is not None and not cached_720p.isNull():
+                            source_for_thumb = cached_720p
+                        else:
+                            source_for_thumb = img
+                        
+                        thumb_img = source_for_thumb.scaled(
+                            thumb_size,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.FastTransformation
+                        )
+                        thumb_pix = QPixmap.fromImage(thumb_img)
+                        del thumb_img  # Explicit cleanup
+                        video_widget._video_label.setPixmap(thumb_pix)
+                    except Exception:
+                        pass
+                
+                # 2. Update Program Monitor (if this input is on air)
+                prog_src = getattr(self, 'active_program_source', None)
+                if prog_src == ('input', input_number) and not getattr(self, '_transition_running', False):
+                    try:
+                        self._set_output_image(img)
+                    except Exception:
+                        pass
+                
+                # 3. Update Preview Monitor (if selected in preview)
+                if prev_src and prev_src == ('input', input_number):
+                    try:
+                        self._update_preview_monitor(img, 'input', input_number)
+                    except Exception:
+                        pass
+            
+            # Explicit cleanup to prevent Qt object accumulation between GC cycles
+            if input_number in self._qt_pending_frames:
+                del self._qt_pending_frames[input_number]
+            thumb_pix = None  # Release pixmap ref
+                        
+        except Exception as e:
+            if not hasattr(self, '_last_input_error_time'): 
+                self._last_input_error_time = 0
+            if time.time() - self._last_input_error_time > 1.0:
+                print(f"Input frame error (Input-{input_number}): {e}")
+                self._last_input_error_time = time.time()
+
+    def _run_deferred_frame_task(self, input_number):
+        """
+        Helper to run deferred frame processing and clear the pending flag.
+        Called via QTimer.singleShot(1) to prevent event queue flooding.
+        
+        This ensures at most ONE timer event per input is pending at any time.
+        New frames arriving during processing just update the stored frame;
+        they don't schedule additional timer events.
+        """
+        # Clear the pending flag FIRST so new frames can schedule again
+        if hasattr(self, '_qt_frame_deferred_pending'):
+            self._qt_frame_deferred_pending[input_number] = False
+        # Now process the latest frame for this input
+        self._process_qt_camera_frame_deferred(input_number)
+
+    @pyqtSlot(int, QImage, QImage)
+    def _on_frame_converted_from_worker(self, input_number, img, scaled_720p):
+        """
+        Receive converted QImage from FrameConverterWorker (executes on main thread).
+        Receives both full-res and pre-scaled versions.
+        Both scaling and image conversion already happened on background thread.
+        
+        OBS-STYLE: Writes to ring buffer for decoupled render thread access.
+        """
+        try:
+            if img is None or img.isNull():
+                return
+            
+            # OBS-STYLE: Initialize ring buffer for this input if not exists
+            if not hasattr(self, '_input_frame_buffers'):
+                self._input_frame_buffers = {}
+            if input_number not in self._input_frame_buffers:
+                self._input_frame_buffers[input_number] = QImageRingBuffer(maxlen=3)
+            
+            # OBS-STYLE: Write full-res frame to ring buffer
+            # This decouples capture thread from render thread
+            self._input_frame_buffers[input_number].put(img)
+            
+            # Store scaled version for UI thumbnails (fast access)
+            if not hasattr(self, 'last_input_image_scaled'):
+                self.last_input_image_scaled = {}
+            cache_key = (input_number, scaled_720p.width(), scaled_720p.height())
+            self.last_input_image_scaled[cache_key] = scaled_720p
+            
+            # Also store in legacy cache for compatibility
             if not hasattr(self, 'last_input_image'):
                 self.last_input_image = {}
-            if not hasattr(self, 'last_input_pixmap'):
-                self.last_input_pixmap = {}
-            # ✅ APPLY CAMERA PROCESSING (brightness, contrast, chroma key, etc.)
-            try:
-                from camera_processor import camera_processors
-                # Always try to process - the processor will handle if no effects are enabled
-                processed_img = camera_processors[input_number].process_frame(img)
-                if processed_img is not None:
-                    img = processed_img
-                    # Only log when effects are actually applied
-                    if camera_processors[input_number].is_enabled():
-                        if self._frame_count[input_number] <= 3:  # Only log first few times
-                            print(f"✅ Applied camera processing to Input-{input_number}")
-            except Exception as e:
-                print(f"Camera processing error for Input-{input_number}: {e}")
+            self.last_input_image[input_number] = img
             
-            # Cache processed image
-            self.last_input_image[input_number] = img.copy()
-            pixmap = QPixmap.fromImage(img)
-            # Target widget
-            video_widget = getattr(self, f'inputVideoFrame{input_number}', None)
-            if not video_widget:
+            # === DIAGNOSTIC: Track actual camera input FPS ===
+            if not hasattr(self, '_input_fps_counters'):
+                self._input_fps_counters = {}
+            if input_number not in self._input_fps_counters:
+                import time as _t
+                self._input_fps_counters[input_number] = {
+                    'count': 0,
+                    'start': _t.monotonic(),
+                    'last_report': _t.monotonic(),
+                    'last_fps': 0.0
+                }
+            
+            import time as _fps_t
+            _fps_now = _fps_t.monotonic()
+            _fps_data = self._input_fps_counters[input_number]
+            _fps_data['count'] += 1
+            
+            # Report every 1 second
+            _fps_elapsed = _fps_now - _fps_data['last_report']
+            if _fps_elapsed >= 1.0:
+                _actual_fps = _fps_data['count'] / _fps_elapsed
+                _fps_data['last_fps'] = _actual_fps
+                _fps_data['count'] = 0
+                _fps_data['last_report'] = _fps_now
+                print(f"Input-{input_number} actual FPS: {_actual_fps:.1f}")
+            
+            # Schedule deferred UI update (coalesced)
+            if not hasattr(self, '_qt_pending_frames'):
+                self._qt_pending_frames = {}
+            self._qt_pending_frames[input_number] = img
+            
+            # Only schedule for active input to prevent flooding
+            active = getattr(self, 'current_output', None)
+            if active and active[0] == 'input' and active[1] != input_number:
                 return
-            widget_size = video_widget.size()
-            if widget_size.width() <= 1 or widget_size.height() <= 1:
-                ms = video_widget.minimumSize()
-                widget_size = ms if ms.isValid() else QSize(320, 180)
-            scaled_pixmap = pixmap.scaled(
-                widget_size,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            # Ensure label and set pixmap
-            if hasattr(video_widget, 'label'):
-                video_widget.label.setPixmap(scaled_pixmap)
-            else:
-                if not hasattr(video_widget, '_video_label'):
-                    from PyQt6.QtWidgets import QLabel, QVBoxLayout, QSizePolicy
-                    video_widget._video_label = QLabel(video_widget)
-                    if not video_widget.layout():
-                        layout = QVBoxLayout(video_widget)
-                        layout.setContentsMargins(0, 0, 0, 0)
-                        video_widget.setLayout(layout)
-                    video_widget._video_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-                    video_widget.layout().addWidget(video_widget._video_label)
-                    video_widget._video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                    video_widget._video_label.setScaledContents(True)
-                video_widget._video_label.setPixmap(scaled_pixmap)
-            # Cache pixmap and update program output if selected
-            self.last_input_pixmap[input_number] = scaled_pixmap
-            if not getattr(self, '_transition_running', False) and self.current_output == ('input', input_number):
-                self._set_output_image(self.last_input_image[input_number])
+            
+            # Prevent event queue flooding
+            if not hasattr(self, '_qt_frame_deferred_pending'):
+                self._qt_frame_deferred_pending = {}
+            
+            was_pending = self._qt_frame_deferred_pending.get(input_number, False)
+            if not was_pending:
+                self._qt_frame_deferred_pending[input_number] = True
+                QTimer.singleShot(0, lambda idx=input_number: self._run_deferred_frame_task(idx))
+                
         except Exception as e:
-            print(f"Qt camera frame error (Input-{input_number}): {e}")
+            import time
+            if not hasattr(self, '_last_converter_error_time'):
+                self._last_converter_error_time = 0
+            now = time.time()
+            if now - self._last_converter_error_time > 1.0:
+                print(f"Frame converter callback error (Input-{input_number}): {e}")
+                self._last_converter_error_time = now
 
+    def _on_native_camera_frame(self, input_number, frame):
+        """Handle frame from native AVFoundation camera."""
+        try:
+            # Convert numpy RGB to QImage
+            height, width, channels = frame.shape
+            bytes_per_line = channels * width
+            q_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+            
+            # Store frame
+            self.last_input_image[input_number] = q_image
+            self.camera_frame_ready.emit(input_number, q_image)
+            
+            # Update preview if this is the active input
+            if hasattr(self, 'current_output') and self.current_output == ('input', input_number):
+                self._set_output_image(q_image)
+        except Exception as e:
+            print(f"[CAMERA] Native frame handler error: {e}")
+            
     def stop_camera_capture(self, input_number):
         """Stop camera capture for specified input"""
         try:
+            # Stop native AVFoundation camera if running
+            if hasattr(self, '_native_camera_inputs') and input_number in self._native_camera_inputs:
+                try:
+                    if hasattr(self, '_macos_native') and self._macos_native:
+                        self._macos_native.stop_native_camera_capture()
+                        print(f"[CAMERA] Stopped native AVFoundation capture for Input-{input_number}")
+                except Exception as e:
+                    print(f"[CAMERA] Error stopping native capture: {e}")
+                self._native_camera_inputs.discard(input_number)
+            
+            # Stop OBS-style camera pipeline if running
+            if input_number in self.camera_managers:
+                try:
+                    mgr = self.camera_managers.pop(input_number)
+                    mgr.stop()
+                    print(f"Stopped OBS-style camera pipeline for Input-{input_number}")
+                except Exception as e:
+                    print(f"Error stopping OBS camera manager: {e}")
+            
+            # Stop legacy QTimer-based camera
             if hasattr(self, 'camera_timers') and input_number in self.camera_timers:
                 self.camera_timers[input_number].stop()
                 del self.camera_timers[input_number]
@@ -3613,10 +7617,76 @@ class GoLiveStudio(QMainWindow):
                     sink.videoFrameChanged.disconnect()
                 except Exception:
                     pass
+            # Clear pending frames to avoid processing stale data
+            if hasattr(self, '_qt_pending_frames') and input_number in self._qt_pending_frames:
+                self._qt_pending_frames.pop(input_number, None)
+            if hasattr(self, '_qt_frame_timer_pending'):
+                self._qt_frame_timer_pending.discard(input_number)
             
             print(f"Stopped camera capture for Input-{input_number}")
+            try:
+                if hasattr(self, '_input_camera_name') and input_number in self._input_camera_name:
+                    self._input_camera_name.pop(input_number, None)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, '_update_input_footer'):
+                    self._update_input_footer(int(input_number))
+            except Exception:
+                pass
         except Exception as e:
             print(f"Error stopping camera capture for Input-{input_number}: {e}")
+
+    def _update_input_footer(self, input_number: int):
+        try:
+            if not hasattr(self, '_input_footer_widgets'):
+                return
+            w = self._input_footer_widgets.get(int(input_number))
+            if not isinstance(w, dict):
+                return
+            dot = w.get('dot')
+            lbl = w.get('label')
+            if dot is None or lbl is None:
+                return
+
+            name = None
+            try:
+                if hasattr(self, '_input_camera_name'):
+                    name = self._input_camera_name.get(int(input_number))
+            except Exception:
+                name = None
+
+            active = False
+            try:
+                if hasattr(self, 'qt_cameras') and int(input_number) in getattr(self, 'qt_cameras', {}):
+                    active = True
+                elif hasattr(self, 'camera_captures') and int(input_number) in getattr(self, 'camera_captures', {}):
+                    active = True
+            except Exception:
+                active = False
+
+            if name:
+                try:
+                    lbl.setText(str(name))
+                except Exception:
+                    pass
+            else:
+                try:
+                    lbl.setText("No camera")
+                except Exception:
+                    pass
+
+            try:
+                if active and name:
+                    dot.setStyleSheet("background:#35C759;border-radius:4px;")
+                else:
+                    dot.setStyleSheet("background:#3a3a3a;border-radius:4px;")
+            except Exception:
+                pass
+        except RuntimeError:
+            pass
+        except Exception:
+            pass
     
     def show_media_selection_dialog(self, media_number):
         """Show enhanced media file selection dialog for the specified media slot"""
@@ -3884,74 +7954,146 @@ Ready to load this media file."""
         """Handle effect image click"""
         try:
             effect_name = os.path.basename(effect_path)
-            # Set overlay on graphics output and refresh
-            if self._graphics_output is not None:
-                self._graphics_output.set_overlay_from_path(effect_path)
-            # Persist last effect
+
+            # Apply effect to PREVIEW ONLY for auditioning
+            self.preview_overlay_path = effect_path
+            
+            # Reset debug flag for new overlay
+            if hasattr(self, '_preview_overlay_composed_logged'):
+                delattr(self, '_preview_overlay_composed_logged')
+            print(f"Selected effect: {effect_name} (Preview only)")
+
+            # Auto-create sidecar JSON with opening rect if missing, so all effects work in Preview
             try:
-                app_config.set('ui.last_effect', effect_path)
-                app_config.save_settings()
+                self._ensure_effect_sidecar(effect_path)
+            except Exception as _e:
+                print(f"[Effect] Sidecar generation skipped: {_e}")
+            # Ensure next preview frames compose overlay immediately (no frame-skipping)
+            try:
+                self._preview_compose_force = 2  # force compose for next 2 frames
             except Exception:
                 pass
-            # Highlight selected in new effects panel
-            if hasattr(self, 'premiere_effects_panel'):
-                # Selection is already handled by the panel itself
+
+            # Force an immediate preview refresh so the user sees the effect instantly
+            try:
+                self._force_preview_refresh()
+            except Exception:
                 pass
-            # Legacy: Highlight selected in old tab system (if still present)
-            elif hasattr(self, '_effects_tabs') and hasattr(self, 'tabWidget_effects'):
+            
+            # Legacy support
+            if hasattr(self, '_effects_tabs') and hasattr(self, 'tabWidget_effects'):
                 idx = self.tabWidget_effects.currentIndex()
                 data = self._effects_tabs.get(idx)
                 if data and 'widget' in data and data['widget']:
                     data['widget'].update_selection(effect_path)
-            self.refresh_output_preview()
+            
+            # Trigger an immediate update of the preview if possible
+            if hasattr(self, 'active_preview_source'):
+                st, idx = self.active_preview_source
+                # If it's an input, we wait for next frame. If media/static, we could force update.
+                
         except Exception as e:
             print(f"Error handling effect click: {e}")
-
-    def on_effect_double_clicked(self, effect_path):
-        """Remove effect on double-click if it's the selected one."""
-        self.on_effect_cleared()
 
     def on_effect_cleared(self):
         """Clear the current effect."""
         try:
-            # Clear overlay
-            if self._graphics_output is not None:
-                self._graphics_output.clear_overlay()
-            # Persist cleared effect
+            # Clear PREVIEW selection only (effect is preview-only)
+            self.preview_overlay_path = None
+            
             try:
-                app_config.set('ui.last_effect', None)
-                app_config.save_settings()
+                if hasattr(self, '_preview_effect_manager') and self._preview_effect_manager is not None:
+                    self._preview_effect_manager.clear_effect()
             except Exception:
                 pass
-            # Clear highlight in new effects panel
-            if hasattr(self, 'premiere_effects_panel'):
-                self.premiere_effects_panel.clear_selection()
-            # Legacy: Clear highlight in old tab system (if still present)
-            elif hasattr(self, '_effects_tabs') and hasattr(self, 'tabWidget_effects'):
-                idx = self.tabWidget_effects.currentIndex()
-                data = self._effects_tabs.get(idx)
-                if data and 'widget' in data and data['widget']:
-                    data['widget'].update_selection(None)
-            self.refresh_output_preview()
+
+            # Clear selection highlight in UI panel if present
+            try:
+                if hasattr(self, 'premiere_effects_panel'):
+                    self.premiere_effects_panel.clear_selection()
+            except Exception:
+                pass
+
+            # Refresh preview (remove effect)
+            try:
+                self._force_preview_refresh()
+            except Exception:
+                pass
+                
         except Exception as e:
             print(f"Error clearing effect: {e}")
 
-    def open_calibration_tool(self):
-        """Open calibration dialog for current overlay to define opening rect JSON."""
+
+    def _ensure_effect_sidecar(self, effect_path: str):
+        """Create a JSON sidecar with 'opening' if it doesn't exist and we can auto-detect it.
+        This makes effects reliable in Preview regardless of click order (effect-first or media-first).
+        """
         try:
-            if self._graphics_output is None:
+            import json, os
+            base, _ = os.path.splitext(effect_path)
+            json_path = base + '.json'
+            if os.path.exists(json_path):
+                return  # nothing to do
+            from PyQt6.QtGui import QImage
+            overlay_img = QImage(str(effect_path))
+            if overlay_img.isNull():
                 return
-            overlay_path = self._graphics_output.get_overlay_path()
-            if not overlay_path or not os.path.exists(overlay_path):
-                print("No overlay selected for calibration")
+            opening = self._detect_overlay_opening(effect_path, overlay_img)
+            if not opening or not isinstance(opening, tuple) or len(opening) != 4:
                 return
-            from calibration_tool import CalibrateOpeningDialog
-            dlg = CalibrateOpeningDialog(self, overlay_path)
-            if dlg.exec():
-                # Reload overlay to apply new opening
-                self._graphics_output.set_overlay_from_path(overlay_path)
+            nx, ny, nw, nh = opening
+            data = {"opening": [round(float(nx), 4), round(float(ny), 4), round(float(nw), 4), round(float(nh), 4)]}
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f)
+            print(f"[Effect] Wrote sidecar: {json_path} opening={data['opening']}")
         except Exception as e:
-            print(f"Calibration tool error: {e}")
+            print(f"[Effect] Failed to write sidecar for {effect_path}: {e}")
+
+    def _force_preview_refresh(self):
+        """Re-render the preview panel immediately using the latest available frame for the
+        current preview source. This helps when selecting an effect while a media source
+        hasn't yet populated last_media_image.
+        """
+        try:
+            pv = getattr(self, 'active_preview_source', None)
+            if not pv or not isinstance(pv, tuple) or len(pv) != 2:
+                return
+            st, idx = pv[0], int(pv[1])
+            img = None
+            if st == 'input':
+                if hasattr(self, 'last_input_image'):
+                    img = self.last_input_image.get(idx)
+            elif st == 'media':
+                # Prefer cached full-res image
+                if hasattr(self, 'last_media_image'):
+                    img = self.last_media_image.get(idx)
+                # Fallback: pull a frame directly from the video sink
+                if (img is None or (hasattr(img, 'isNull') and img.isNull())):
+                    try:
+                        if hasattr(self, 'media_sinks') and isinstance(self.media_sinks, dict):
+                            sink = self.media_sinks.get(idx)
+                            if sink and hasattr(sink, 'videoFrame'):
+                                vf = sink.videoFrame()
+                                if vf and vf.isValid():
+                                    img = vf.toImage()
+                    except Exception:
+                        pass
+                # Fallback: use pixmap cache
+                if (img is None or (hasattr(img, 'isNull') and img.isNull())) and hasattr(self, 'last_media_pixmap'):
+                    pm = self.last_media_pixmap.get(idx)
+                    if pm is not None and hasattr(pm, 'toImage'):
+                        try:
+                            img = pm.toImage()
+                        except Exception:
+                            img = None
+            # Trigger preview update
+            self._update_preview_monitor(img, st, idx)
+        except Exception:
+            pass
+
+    def open_calibration_tool(self):
+        """Calibration tool is unavailable (missing calibration_tool.py)."""
+        print("Calibration tool is not available in this build.")
 
     def refresh_output_preview(self):
         """Re-render the output preview with current effect and last frame (or black)."""
@@ -3980,11 +8122,42 @@ Ready to load this media file."""
                 self._set_output_image(None)
         except Exception as e:
             print(f"Error refreshing output preview: {e}")
+
+    def _on_master_frame_tick(self, ts):
+        """Master clock tick: refresh the Preview monitor independently at global FPS.
+        Does not affect Program output, audio, or encoders.
+        """
+        try:
+            pv = getattr(self, 'active_preview_source', None)
+            if not pv or not isinstance(pv, tuple) or len(pv) != 2:
+                return
+            st, idx = pv[0], int(pv[1])
+            frame = None
+            if st == 'input':
+                frame = self.last_input_image.get(idx) if hasattr(self, 'last_input_image') else None
+            elif st == 'media':
+                frame = self.last_media_image.get(idx) if hasattr(self, 'last_media_image') else None
+            self._update_preview_monitor(frame, st, idx)
+        except Exception:
+            pass
     
     def init_app_state(self):
         """Initialize the application state"""
         self.recording = False
         self.playing = False
+
+        # Effects workflow state
+        self.preview_overlay_path = None
+        self.program_overlay_path = None
+
+        # Backend project model (Scenes/Sources persistence) - headless for now (no UI changes)
+        try:
+            if ProjectManager is not None and not hasattr(self, 'project_manager'):
+                self.project_manager = ProjectManager()
+                self.project = self.project_manager.load()
+        except Exception:
+            pass
+
         self.stream1_active = False
         self.stream2_active = False
         self.audio_monitor_muted = False
@@ -3995,6 +8168,9 @@ Ready to load this media file."""
         self.controls_locked = False
         
         # Renderer performance tracking
+        self.renderer_mode = "Quality"
+        self.renderer_fps = 60
+
         self._renderer_stats = {
             'frame_count': 0,
             'last_fps_check': 0,
@@ -4005,6 +8181,7 @@ Ready to load this media file."""
             'inputs': {1: True, 2: True, 3: True},
             'media': {1: True, 2: True, 3: True},
         }
+
         self.input1_audio_muted = False
         self.input2_audio_muted = False
         self.input3_audio_muted = False
@@ -4065,7 +8242,7 @@ Ready to load this media file."""
         # Initialize input audio monitors (Phase 2) containers
         self.input_audio_inputs = {}
         self.input_audio_sinks = {}
-        
+
         # Clear effects and ensure text overlay is disabled by default
         if self._graphics_output is not None:
             self._graphics_output.clear_overlay()
@@ -4075,7 +8252,7 @@ Ready to load this media file."""
                 'text': '',
                 'font_size': 36,
                 'font_family': '',
-                'color': 0xFFFFFFFF,  # rgba format
+                'color': 0xFFFFFFFF,
                 'stroke_color': 0xFF000000,
                 'stroke_width': 3,
                 'bg_enabled': False,
@@ -4101,6 +8278,17 @@ Ready to load this media file."""
             pass
         
         try:
+            # Stop frame processing workers (WINDOWS FPS FIX)
+            try:
+                if hasattr(self, '_frame_workers') and isinstance(self._frame_workers, dict):
+                    for worker in list(self._frame_workers.values()):
+                        try:
+                            worker.stop()
+                        except Exception:
+                            pass
+                    self._frame_workers.clear()
+            except Exception:
+                pass
             # Stop streaming controllers (primary)
             try:
                 if hasattr(self, 'stream_controller') and self.stream_controller:
@@ -4129,10 +8317,25 @@ Ready to load this media file."""
                     self.mirror_controller.stop()
             except Exception:
                 pass
+            # Stop OBS-style camera pipelines
+            try:
+                if hasattr(self, 'camera_managers') and isinstance(self.camera_managers, dict):
+                    for input_num in list(self.camera_managers.keys()):
+                        try:
+                            self.stop_camera_capture(input_num)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
             # Save UI/session settings
             try:
                 if self._graphics_output is not None:
                     # Keep existing config values (overscan/fps tracked elsewhere)
+                    pass
+                try:
+                    if hasattr(self, 'project_manager') and getattr(self, 'project_manager', None) is not None:
+                        self.project_manager.save()
+                except Exception:
                     pass
                 app_config.save_settings()
             except Exception:
@@ -4164,7 +8367,21 @@ Ready to load this media file."""
                 image_memory_pool.clear()
             except:
                 pass
-                
+            
+            # Shutdown GPU acceleration
+            try:
+                if GPU_ACCELERATION_AVAILABLE:
+                    shutdown_gpu_acceleration()
+            except:
+                pass
+            
+            # Shutdown GPU pipeline (Phase 3)
+            try:
+                if GPU_PIPELINE_AVAILABLE:
+                    shutdown_gpu_pipeline()
+            except:
+                pass
+            
         except Exception:
             pass
         super().closeEvent(event)
@@ -4192,22 +8409,45 @@ Ready to load this media file."""
             
             if not current_state:
                 # Start recording
+                # === DIAGNOSTIC: Recording start ===
+                print(f"\n[REC] 🔴 Recording starting — main.py")
+                print(f"[REC]    Time: {time.strftime('%H:%M:%S')}\n")
                 print("🎥 Starting recording...")
                 success = self.start_recording()
                 if success:
                     self.recording = True
+                    try:
+                        self.update_record_status("Recording", "#ff0000")
+                    except Exception:
+                        pass
                     print("✅ Recording started successfully")
                 else:
                     self.recording = False
+                    try:
+                        self.update_record_status("Ready", "#777777")
+                    except Exception:
+                        pass
                     print("❌ Failed to start recording")
             else:
                 # Stop recording
+                # === DIAGNOSTIC: Recording stop ===
+                print(f"\n[REC] ⬜ Recording stopping — main.py")
+                print(f"[REC]    Time: {time.strftime('%H:%M:%S')}\n")
                 print("🛑 Stopping recording...")
                 self.stop_recording()
                 self.recording = False
+                try:
+                    self.update_record_status("Ready", "#777777")
+                except Exception:
+                    pass
                 print("✅ Recording stopped")
                 
         except Exception as e:
+            # === DIAGNOSTIC: Recording error ===
+            _diag_error("Recording toggle failed",
+                       e,
+                       f"File: main.py | "
+                       f"Current state: {getattr(self, 'recording', False)}")
             print(f"❌ Error toggling recording: {e}")
             self.recording = False
             from PyQt6.QtWidgets import QMessageBox
@@ -4304,6 +8544,14 @@ Ready to load this media file."""
         """Enhanced start recording with better validation and error handling."""
         try:
             print("🎬 Initializing recording...")
+
+            # Ensure recorder controller is initialized (lazy init in case startup init failed)
+            try:
+                self._ensure_recorder_controller()
+            except Exception as _e:
+                print(f"❌ Recorder controller init failed: {_e}")
+                import traceback
+                traceback.print_exc()
             
             # Check if recorder controller exists
             if not hasattr(self, 'recorder_controller') or not self.recorder_controller:
@@ -4402,13 +8650,56 @@ Ready to load this media file."""
             
             # Audio configuration
             if include_audio and not program_media_audio_path:
+                # First, try to use the audio device stored in config (from recording settings dialog)
+                audio_device = app_config.get('recording.audio_device', '') or ''
+                if audio_device:
+                    print(f"🎤 ✅ Using audio device from settings: {audio_device}")
+                else:
+                    print(f"🎤 ⚠️ No audio device in config, attempting auto-detection...")
+                    # Fallback: Reuse streaming's auto device detection for convenience
+                    try:
+                        sc = None
+                        if hasattr(self, 'stream_controllers') and isinstance(self.stream_controllers, dict):
+                            sc = self.stream_controllers.get(1) or self.stream_controllers.get(2)
+                        if sc is not None and hasattr(sc, '_auto_select_audio_device'):
+                            audio_device = sc._auto_select_audio_device() or ''
+                            if audio_device:
+                                print(f"🎤 ✅ Auto-selected audio device: {audio_device}")
+                            else:
+                                print(f"🎤 ⚠️ Streaming controller did not return device")
+                    except Exception as e:
+                        print(f"🎤 ⚠️ Streaming controller fallback failed: {e}")
+                        audio_device = ''
+
+            # Windows fallback: if no device was selected, try to pick the first available dshow audio device
+            if include_audio and not program_media_audio_path and not audio_device:
+                print(f"🎤 ⚠️ Attempting Windows DirectShow device fallback...")
                 try:
-                    # Reuse streaming's auto device detection for convenience
-                    if hasattr(self, 'stream_controller') and hasattr(self.stream_controller, '_auto_select_audio_device'):
-                        audio_device = self.stream_controller._auto_select_audio_device() or ''
-                        print(f"🎤 Audio device: {audio_device}")
-                except Exception:
-                    audio_device = ''
+                    import sys as _sys
+                    if _sys.platform.startswith('win'):
+                        from ffmpeg_utils import get_ffmpeg_path
+                        import subprocess
+                        ffmpeg_path = get_ffmpeg_path()
+                        print(f"🎤 Querying FFmpeg for audio devices...")
+                        res = subprocess.run(
+                            [ffmpeg_path, '-hide_banner', '-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'],
+                            capture_output=True, text=True, timeout=3
+                        )
+                        text = (res.stdout or '') + '\n' + (res.stderr or '')
+                        for line in text.splitlines():
+                            l = (line or '').strip()
+                            if '(audio)' in l and '"' in l:
+                                try:
+                                    audio_device = l.split('"')[1]
+                                    break
+                                except Exception:
+                                    continue
+                        if audio_device:
+                            print(f"🎤 ✅ Windows fallback audio device found: {audio_device}")
+                        else:
+                            print(f"🎤 ❌ Windows fallback: No audio devices found")
+                except Exception as e:
+                    print(f"🎤 ❌ Windows fallback failed: {e}")
             
             # Get advanced settings from recording settings dialog
             advanced_settings = self._get_recording_advanced_settings()
@@ -4422,6 +8713,8 @@ Ready to load this media file."""
             print(f"  FPS: {fps}")
             print(f"  Bitrate: {eff_bitrate} kbps")
             print(f"  Format: {advanced_settings.get('format', 'MP4')}")
+            print(f"  🎤 Audio capture: {include_audio and not program_media_audio_path}")
+            print(f"  🎤 Audio device: {audio_device if audio_device else '(None - will use fallback)'}")
             # Respect user include_audio setting when not muxing media audio
             
             settings = {
@@ -4447,13 +8740,21 @@ Ready to load this media file."""
                 # Update UI
                 self.update_record_status("Recording", "#ff0000")
                 
-                # Update record button icon to show recording state
-                if hasattr(self, 'recordRedCircle'):
-                    self.recordRedCircle.setStyleSheet("background-color: #ff0000; border-radius: 15px;")
+                # Update record button icon to show recording state (guard widget lifetime)
+                try:
+                    btn = getattr(self, 'recordRedCircle', None)
+                    if btn is not None:
+                        btn.setStyleSheet("background-color: #ff0000; border-radius: 15px;")
+                except Exception:
+                    pass
                 
-                # Show Pause icon on play button
-                if hasattr(self, 'playButton'):
-                    self.playButton.setIcon(self.get_icon("Pause.png"))
+                # Show Pause icon on play button (guard widget lifetime)
+                try:
+                    pb = getattr(self, 'playButton', None)
+                    if pb is not None:
+                        pb.setIcon(self.get_icon("Pause.png"))
+                except Exception:
+                    pass
                 
                 print("✅ Recording started successfully")
                 return True
@@ -4469,6 +8770,23 @@ Ready to load this media file."""
             import traceback
             traceback.print_exc()
             return False
+
+    def _ensure_recorder_controller(self):
+        try:
+            if hasattr(self, 'recorder_controller') and self.recorder_controller:
+                return
+        except Exception:
+            # If PyQt object has been deleted, accessing it may raise; recreate
+            pass
+
+        print("🎥 Initializing recording controller (lazy)...")
+        self.recorder_controller = RecorderController(self)
+        self.recorder_controller.set_frame_provider(self._provide_stream_frame)
+        self.recorder_controller.on_log(self._on_record_log)
+        self.recorder_controller.statusChanged.connect(self._on_record_status_changed)
+        if not hasattr(self, 'recording'):
+            self.recording = False
+        print("✅ Recording controller initialized successfully (lazy)")
     
     def check_recording_health(self) -> dict:
         """Check recording system health and return diagnostic information."""
@@ -4619,12 +8937,20 @@ Ready to load this media file."""
             self.update_record_status("Ready", "#777777")
             
             # Reset record button appearance
-            if hasattr(self, 'recordRedCircle'):
-                self.recordRedCircle.setStyleSheet("background-color: #404040; border-radius: 15px;")
+            try:
+                btn = getattr(self, 'recordRedCircle', None)
+                if btn is not None:
+                    btn.setStyleSheet("background-color: #404040; border-radius: 15px;")
+            except Exception:
+                pass
             
             # Reset play button to Play icon
-            if hasattr(self, 'playButton'):
-                self.playButton.setIcon(self.get_icon("Play.png"))
+            try:
+                pb = getattr(self, 'playButton', None)
+                if pb is not None:
+                    pb.setIcon(self.get_icon("Play.png"))
+            except Exception:
+                pass
             
             print("✅ Recording stopped successfully")
             
@@ -4708,24 +9034,35 @@ Ready to load this media file."""
             print("🎥 Opening recording settings dialog...")
             initial = app_config.get('recording.output_path', '') or ''
             include_audio = bool(app_config.get('recording.audio_enabled', True))
+            initial_audio_device = app_config.get('recording.audio_device', '') or ''
             print(f"📁 Initial path: {initial}")
             print(f"🎧 Include audio: {include_audio}")
+            print(f"🎤 Initial audio device: {initial_audio_device if initial_audio_device else '(Default/Auto-detect)'}")
             
-            dlg = RecordingSettingsDialog(self, initial_path=initial, include_audio=include_audio)
+            dlg = RecordingSettingsDialog(self, initial_path=initial, include_audio=include_audio, initial_audio_device=initial_audio_device)
             print("✅ Recording settings dialog created successfully")
             
             if dlg.exec():
-                path, audio = dlg.get_values()
-                advanced = dlg.get_advanced_settings()
+                values = dlg.get_values() or {}
+                advanced = dlg.get_advanced_settings() or {}
+                path = (values.get('output_path') or '').strip() if isinstance(values, dict) else ''
+                audio = bool(values.get('audio_enabled', True)) if isinstance(values, dict) else True
+                audio_device = (values.get('audio_device') or '').strip() if isinstance(values, dict) else ''
                 print(f"💾 User saved settings:")
                 print(f"  📁 Path: {path}")
                 print(f"  🎧 Audio: {audio}")
-                print(f"  🎬 Format: {advanced.get('format', 'Unknown')}")
-                print(f"  ⭐ Quality: CRF {advanced.get('crf', 'Unknown')}")
+                print(f"  🎤 Audio Device: {audio_device if audio_device else '(Default/Auto-detect)'}")
+                try:
+                    if isinstance(values, dict):
+                        print(f"  🎬 Format: {values.get('format', 'Unknown')}")
+                        print(f"  ⭐ Quality: CRF {values.get('crf', 'Unknown')}")
+                except Exception:
+                    pass
                 
                 if path:
                     app_config.set('recording.output_path', path)
                     app_config.set('recording.audio_enabled', bool(audio))
+                    app_config.set('recording.audio_device', audio_device)
                     app_config.save_settings()
                     print("✅ Recording settings saved to config")
                 else:
@@ -4769,11 +9106,32 @@ Ready to load this media file."""
                 print(text, end='' if text.endswith('\n') else '\n')
         except Exception:
             pass
-    
-    def get_stream_controller(self, stream_id: int) -> StreamController:
+
+    def _on_stream_log(self, text: str):
+        """Stream controller FFmpeg/log output - always print to terminal for debugging."""
         try:
-            return self.stream_controllers.get(stream_id)
+            if text:
+                print(text, end='' if text.endswith('\n') else '\n')
         except Exception:
+            pass
+
+    def get_stream_controller(self, stream_id: int) -> StreamController:
+        """Get the StreamController for the given stream_id. Falls back to legacy controller for stream 1 if needed."""
+        try:
+            if hasattr(self, 'stream_controllers') and isinstance(self.stream_controllers, dict):
+                ctrl = self.stream_controllers.get(stream_id)
+                if ctrl is not None:
+                    return ctrl
+            # Fallback: use legacy stream_controller for stream 1 (in case stream_controllers init failed)
+            if stream_id == 1 and hasattr(self, 'stream_controller') and self.stream_controller is not None:
+                return self.stream_controller
+            if not hasattr(self, 'stream_controllers'):
+                print(f"[STREAM] get_stream_controller: stream_controllers not initialized")
+            elif stream_id not in (getattr(self, 'stream_controllers', None) or {}):
+                print(f"[STREAM] get_stream_controller: no controller for stream {stream_id}")
+            return None
+        except Exception as e:
+            print(f"[STREAM] get_stream_controller error: {e}")
             return None
 
     def handle_stream_button_click(self, stream_id: int):
@@ -4788,7 +9146,10 @@ Ready to load this media file."""
         current = getattr(self, active_attr, False)
         controller = self.get_stream_controller(stream_id)
         if controller is None:
-            print(f"❌ Stream controller for stream {stream_id} not available")
+            print(f"❌ Stream controller for stream {stream_id} not available (see logs above)")
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, f"Stream {stream_id} Error",
+                "Streaming controller not available. The stream controllers may not have initialized correctly. Try restarting the application.")
             return
         
         if not current:
@@ -4803,35 +9164,35 @@ Ready to load this media file."""
                 return
             
             try:
-                # Apply streaming optimizations for YouTube
                 if settings.get('platform') == 'YouTube Live':
                     self._apply_youtube_optimizations(settings)
-                
-                controller.start(settings)
-                setattr(self, active_attr, True)
-                
-                # Update button appearance - keep settings icon but change background
-                btn = getattr(self, f'stream{stream_id}SettingsBtn', None)
-                if btn:
-                    btn.setIcon(self.get_icon("Settings.png"))  # Keep settings icon
-                    btn.setStyleSheet("border-radius: 5px; background-color: #ff4444;")  # Red when streaming
-                
-                self.update_record_status(f"Streaming {stream_id}", "#00aa00")
-                print(f"✅ Stream {stream_id} started successfully")
-                
-                # Show streaming health info
-                self._show_streaming_health_info(stream_id, settings)
-                
-                # Automatically apply audio delay correction when streaming starts
-                print(f"🎧 Applying audio delay correction for Stream {stream_id}...")
-                self._auto_apply_audio_delay_correction()
-                
-            except Exception as e:
-                print(f"❌ Failed to start Stream {stream_id}: {e}")
-                # Show error to user
-                from PyQt6.QtWidgets import QMessageBox
-                QMessageBox.critical(self, f"Stream {stream_id} Error", 
-                                   f"Failed to start stream:\n{str(e)}\n\nCheck your stream settings.")
+            except Exception:
+                pass
+            
+            def _do_start():
+                try:
+                    controller.start(settings)
+                except Exception as e:
+                    # Marshal error back to main thread
+                    from PyQt6.QtCore import QMetaObject, Qt
+                    QMetaObject.invokeMethod(
+                        self, "_on_stream_start_error",
+                        Qt.ConnectionType.QueuedConnection,
+                        Q_ARG(int, stream_id),
+                        Q_ARG(str, str(e))
+                    )
+                    return
+                # Marshal success back to main thread
+                from PyQt6.QtCore import QMetaObject, Qt
+                QMetaObject.invokeMethod(
+                    self, "_on_stream_start_success",
+                    Qt.ConnectionType.QueuedConnection,
+                    Q_ARG(int, stream_id)
+                )
+            
+            import threading
+            t = threading.Thread(target=_do_start, daemon=True, name=f"StreamStart-{stream_id}")
+            t.start()
         else:
             # Stop streaming
             print(f"🛑 Stopping Stream {stream_id}...")
@@ -4846,6 +9207,55 @@ Ready to load this media file."""
             
             self.update_record_status("Ready", "#777777")
             print(f"✅ Stream {stream_id} stopped")
+    
+    @pyqtSlot(int)
+    def _on_stream_start_success(self, stream_id: int):
+        """Called on main thread after stream starts successfully."""
+        # === DIAGNOSTIC: Stream started success ===
+        print(f"\n[STREAM] 🔴 STREAM {stream_id} STARTED — main.py")
+        print(f"[STREAM]    Platform  : {getattr(self, '_current_platform', 'External Mirror') or 'External Mirror'}")
+        print(f"[STREAM]    Target FPS: {getattr(self, '_current_fps', 30)}")
+        print(f"[STREAM]    Resolution: {getattr(self, '_output_width', '?')}x{getattr(self, '_output_height', '?')}")
+        print(f"[STREAM]    Thread    : {threading.current_thread().name}")
+        print(f"[STREAM]    Time      : {time.strftime('%H:%M:%S')}\n")
+        active_attr = f'stream{stream_id}_active'
+        setattr(self, active_attr, True)
+        
+        btn = getattr(self, f'stream{stream_id}SettingsBtn', None)
+        if btn:
+            btn.setIcon(self.get_icon("Settings.png"))
+            btn.setStyleSheet("border-radius: 5px; background-color: #ff4444;")
+        
+        self.update_record_status(f"Streaming {stream_id}", "#00aa00")
+        print(f"✅ Stream {stream_id} started successfully")
+        
+        try:
+            self._show_streaming_health_info(stream_id, {})
+        except Exception:
+            pass
+        try:
+            self._auto_apply_audio_delay_correction()
+        except Exception:
+            pass
+    
+    @pyqtSlot(int, str)
+    def _on_stream_start_error(self, stream_id: int, error_msg: str):
+        """Called on main thread when stream fails to start."""
+        # === DIAGNOSTIC: Stream start error ===
+        print(f"\n[STREAM] ❌ STREAM {stream_id} FAILED TO START — main.py")
+        print(f"[STREAM]    Error: {error_msg}")
+        print(f"[STREAM]    Time : {time.strftime('%H:%M:%S')}\n")
+        # Try to create an exception-like object for _diag_error
+        try:
+            raise RuntimeError(f"Stream {stream_id} startup failed: {error_msg}")
+        except Exception as e:
+            _diag_error(f"Stream {stream_id} failed to start",
+                       e,
+                       f"File: main.py → _on_stream_start_error | "
+                       f"Error message: {error_msg}")
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.critical(self, f"Stream {stream_id} Error",
+                             f"Failed to start stream:\n{error_msg}\n\nCheck your stream settings.")
     
     def open_stream_settings_dialog(self, stream_id: int):
         try:
@@ -4907,13 +9317,13 @@ Ready to load this media file."""
             'width': app_config.get(f'{prefix}.width', 1920),
             'height': app_config.get(f'{prefix}.height', 1080),
             'fps': app_config.get(f'{prefix}.fps', 60),
-            # Audio capture settings
-            'capture_audio': app_config.get(f'{prefix}.capture_audio', False),
+            # Audio capture settings (default True so stream has mic by default)
+            'capture_audio': app_config.get(f'{prefix}.capture_audio', True),
             'audio_device': app_config.get(f'{prefix}.audio_device', ''),
             # Advanced encoding and sync
             'video_preset': app_config.get(f'{prefix}.video_preset', 'veryfast'),
             'crf': app_config.get(f'{prefix}.crf', 20),
-            'av_sync_delay_ms': int(app_config.get(f'{prefix}.av_sync_delay_ms', 50)),
+            'av_sync_delay_ms': int(app_config.get(f'{prefix}.av_sync_delay_ms', 0)),
             'bitrate_kbps': int(app_config.get(f'{prefix}.bitrate_kbps', 0) or 0),
             'use_av_master_clock': bool(app_config.get(f'{prefix}.use_av_master_clock', True)),
             # Background Music (BGM)
@@ -5017,84 +9427,305 @@ Ready to load this media file."""
         
         print("=" * 50)
 
-    def _provide_stream_frame(self, size: QSize, direct_passthrough: bool = False) -> QImage:
-        """Render the current program output at desired size for streaming.
+    def _apply_frame_effects(self, frame: QImage) -> QImage:
+        """Apply overlay effects to a frame for streaming output using graphics output widget's system.
         
-        PIXELATION FIX: This method now renders at the exact requested size
-        to prevent upscaling artifacts when mirroring to external displays.
+        Uses the same overlay masking as the graphics output widget to ensure
+        the camera frame appears properly positioned inside the overlay frame,
+        just like it displays in PROGRAM LIVE.
         
         Args:
-            size: Target size of the output frame (CRITICAL: render at this exact size)
-            direct_passthrough: If True, bypass all effects and return raw input/media source
+            frame: Input QImage frame
+            
+        Returns:
+            QImage with overlay effects properly applied with masking
         """
-        # Debug frame provider calls (only log first few calls to avoid spam)
-        if not hasattr(self, '_frame_provider_call_count'):
-            self._frame_provider_call_count = 0
-        self._frame_provider_call_count += 1
+        try:
+            if frame is None or frame.isNull():
+                return frame
+            
+            # Use graphics output widget's overlay system for proper masking
+            if not hasattr(self, '_graphics_output') or self._graphics_output is None:
+                return frame
+            
+            graphics_output = self._graphics_output
+            
+            # Check if graphics output has an active overlay with opening
+            overlay_image = getattr(graphics_output, '_overlay_image', None)
+            opening_norm = getattr(graphics_output, '_opening_norm', None)
+            
+            # No overlay active - return frame as-is
+            if overlay_image is None or overlay_image.isNull() or opening_norm is None:
+                return frame
+            
+            try:
+                from PyQt6.QtGui import QPainter, QImage
+                from PyQt6.QtCore import Qt, QRectF
+                
+                # Create output image at frame size
+                output = QImage(frame.size(), QImage.Format.Format_ARGB32_Premultiplied)
+                output.fill(0)  # Transparent background
+                
+                painter = QPainter(output)
+                try:
+                    size = frame.size()
+                    W_w = size.width()
+                    H_w = size.height()
+                    
+                    # Get overlay geometry (how the overlay sits on the frame)
+                    geom = graphics_output._get_overlay_geom(size, overlay_image)
+                    if geom is not None:
+                        scaled_w, scaled_h, off_x, off_y = geom
+                        nx, ny, nw, nh = opening_norm
+                        
+                        # Calculate opening area in output coordinates
+                        video_rect = QRectF(
+                            off_x + (nx * scaled_w),
+                            off_y + (ny * scaled_h),
+                            max(1.0, nw * scaled_w),
+                            max(1.0, nh * scaled_h)
+                        )
+                        
+                        # Draw frame to fill the opening area (like graphics output does)
+                        painter.drawImage(video_rect, frame, QRectF(frame.rect()))
+                        
+                        # Build and apply mask to clip frame to opening area only
+                        try:
+                            mask = graphics_output._build_opening_mask_for_opening(size, opening_norm, overlay_image)
+                            if mask and not mask.isNull():
+                                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+                                painter.drawImage(0, 0, mask)
+                                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+                        except Exception:
+                            pass  # Mask application optional
+                        
+                        # Draw overlay frame on top
+                        scaled_overlay = overlay_image.scaled(
+                            size,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation
+                        )
+                        x = (W_w - scaled_overlay.width()) // 2
+                        y = (H_w - scaled_overlay.height()) // 2
+                        painter.drawImage(x, y, scaled_overlay)
+                        
+                        return output
+                
+                finally:
+                    painter.end()
+                
+                return frame
+            except Exception as e:
+                # Error using graphics output methods - fallback to simple overlay
+                if not getattr(self, '_effect_error_logged', False):
+                    print(f"[Stream Effects] Graphic overlay error: {e}")
+                    self._effect_error_logged = True
+                return frame
+        except Exception:
+            return frame
+
+    def _provide_stream_frame(self, size: QSize, direct_passthrough: bool = False) -> QImage:
+        """Provide frame for streaming output using pre-scaled cache.
         
-        if self._frame_provider_call_count <= 5 or self._frame_provider_call_count % 100 == 0:
-            print(f"🎬 Frame provider called #{self._frame_provider_call_count}, size: {size.width()}x{size.height()}")
+        OPTIMIZATION: Check pre-scaled cache first (fast path on background thread).
+        Only scale if cache miss. Pre-scaling happens on main thread when frames arrive.
         
-        if self._graphics_output is None:
-            if self._frame_provider_call_count <= 3:
-                print("⚠️ Graphics output is None, returning black frame")
-            # Return a black frame if no graphics output
-            img = QImage(size, QImage.Format.Format_RGBA8888)
-            img.fill(0)  # Black
-            return img
+        Args:
+            size: Requested output size
+            direct_passthrough: If True, bypass effects and return raw camera frame
+        """
+        # Track FPS throttling per resolution
+        if not hasattr(self, '_frame_provider_throttle'):
+            self._frame_provider_throttle = {}
+        
+        import time as _throttle_time
+        _now = _throttle_time.perf_counter()
+        _size_key = (size.width(), size.height())
+        _last_time = self._frame_provider_throttle.get(_size_key, 0.0)
+        
+        # Throttle by resolution (camera hardware limits)
+        # FIXED: Don't gate frame delivery by resolution - render threads pace themselves
+        # Use measured input FPS for diagnostics only
+        active_input = None
+        if hasattr(self, 'current_output') and self.current_output:
+            source_type, source_id = self.current_output
+            if source_type == 'input':
+                active_input = source_id
+        
+        if active_input is not None and hasattr(self, '_input_fps_counters'):
+            measured_fps = self._input_fps_counters.get(active_input, {}).get('last_fps', 0.0)
+            if measured_fps > 0:
+                _diagnostic_fps = int(measured_fps)
+            else:
+                _diagnostic_fps = 30 if (size.width() >= 1920 and size.height() >= 1080) else 60
+        else:
+            _diagnostic_fps = 30 if (size.width() >= 1920 and size.height() >= 1080) else 60
+        
+        # DEBUG: Log occasionally
+        if not hasattr(self, '_fp_call_count'):
+            self._fp_call_count = 0
+        self._fp_call_count += 1
+        if self._fp_call_count <= 5 or self._fp_call_count % 60 == 0:
+            print(f"🎬 Frame provider: call #{self._fp_call_count}, active_input={active_input}, size={size.width()}x{size.height()}")
         
         try:
-            # Force graphics refresh during recording
-            if hasattr(self, 'recording') and self.recording and hasattr(self._graphics_output, 'update'):
-                self._graphics_output.update()
+            def _ensure_exact_size(img: QImage) -> QImage:
+                """Ensure image is exactly the requested size, with fast path for exact match."""
+                try:
+                    if img is None or img.isNull():
+                        out = QImage(size, QImage.Format.Format_RGBA8888)
+                        out.fill(0)
+                        return out
+                    # FAST PATH: If already exact size, return as-is
+                    if img.size() == size and img.format() == QImage.Format.Format_RGBA8888:
+                        return img
+                    # Size mismatch - need to create exact size
+                    from PyQt6.QtGui import QPainter
+                    out = QImage(size, QImage.Format.Format_RGBA8888)
+                    out.fill(0)
+                    painter = QPainter(out)
+                    try:
+                        # If image is close to target, center it without scaling
+                        if img.width() > size.width() * 0.9 and img.height() > size.height() * 0.9:
+                            x = (size.width() - img.width()) // 2
+                            y = (size.height() - img.height()) // 2
+                            painter.drawImage(x, y, img)
+                        else:
+                            # Image is significantly different size - scale it
+                            scaled = img.scaled(
+                                size,
+                                Qt.AspectRatioMode.KeepAspectRatio,
+                                Qt.TransformationMode.FastTransformation
+                            )
+                            x = (size.width() - scaled.width()) // 2
+                            y = (size.height() - scaled.height()) // 2
+                            painter.drawImage(x, y, scaled)
+                    finally:
+                        painter.end()
+                    return out
+                except Exception:
+                    out = QImage(size, QImage.Format.Format_RGBA8888)
+                    out.fill(0)
+                    return out
+
+            # STEP 1: Determine active input (the one being displayed/streamed)
+            active_input = None
+            if hasattr(self, 'current_output') and self.current_output:
+                source_type, source_id = self.current_output
+                if source_type == 'input':
+                    active_input = source_id
             
-            # PIXELATION FIX: Set the graphics output to render at the exact target size
-            # This prevents upscaling artifacts by rendering directly at external display resolution
-            if hasattr(self._graphics_output, 'set_preview_render_size'):
-                self._graphics_output.set_preview_render_size(size)
+            # Default to input 1 if no input is selected
+            if active_input is None:
+                active_input = 1
+                if self._fp_call_count <= 10:
+                    print(f"  -> No input selected, defaulting to Input-1")
             
-            # Prefer explicit request, otherwise honor global passthrough flag
-            if direct_passthrough or getattr(self, 'passthrough_enabled', False):
-                # Get the current active source directly without any effects
-                current_source = self._graphics_output.get_current_source()
-                if current_source and current_source['type'] == 'media':
-                    # For media, get the current frame from the media player
-                    media_index = current_source['index']
-                    media_player = self.media_players.get(media_index)
-                    if media_player and media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
-                        # Get the video frame from the video sink if available
-                        video_sink = self.media_sinks.get(media_index)
-                        if video_sink and hasattr(video_sink, 'videoFrame'):
-                            frame = video_sink.videoFrame()
-                            if not frame.isValid():
-                                return QImage(size, QImage.Format.Format_RGBA8888)
-                            # PIXELATION FIX: Always use SmoothTransformation
-                            return frame.toImage().scaled(size, Qt.AspectRatioMode.KeepAspectRatio, 
-                                                       Qt.TransformationMode.SmoothTransformation)
-                
-                # For camera or no valid media, get the current source frame
-                frame = self._graphics_output.render_source_only(size)
-            else:
-                # Normal mode with all effects applied - render at exact target size
-                frame = self._graphics_output.render_to_image(size)
+            if active_input is None:
+                if self._fp_call_count <= 10:
+                    print(f"  -> No active input (current_output={getattr(self, 'current_output', None)})")
+                black = QImage(size, QImage.Format.Format_RGBA8888)
+                black.fill(0)
+                return black
             
-            if frame.isNull():
-                if self._frame_provider_call_count <= 3:
-                    print("⚠️ Graphics output returned null frame, using black frame")
-                # Fallback to black frame
-                frame = QImage(size, QImage.Format.Format_RGBA8888)
-                frame.fill(0)
-                
-            return frame
+            # STEP 2: OBS-STYLE — Read from ring buffer first (decoupled capture/render)
+            if hasattr(self, '_input_frame_buffers') and active_input in self._input_frame_buffers:
+                ring_buffer = self._input_frame_buffers[active_input]
+                img = ring_buffer.get_latest()
+                if img is not None and not img.isNull():
+                    # Fast path: return cached scaled version if available
+                    cache_key = (active_input, size.width(), size.height())
+                    scaled_cache = getattr(self, 'last_input_image_scaled', {})
+                    cached_scaled = scaled_cache.get(cache_key)
+                    if cached_scaled is not None and not cached_scaled.isNull():
+                        if self._fp_call_count <= 10:
+                            print(f"  -> RING BUFFER + CACHE HIT for {size.width()}x{size.height()}")
+                        return cached_scaled.copy()
+                    
+                    # Scale if needed
+                    if img.size() != size:
+                        if self._fp_call_count <= 3:
+                            print(f"  -> Ring buffer hit, scaling from {img.width()}x{img.height()} to {size.width()}x{size.height()}")
+                        img = img.scaled(
+                            size,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.FastTransformation
+                        )
+                        # Cache for future calls
+                        if not hasattr(self, 'last_input_image_scaled'):
+                            self.last_input_image_scaled = {}
+                        self.last_input_image_scaled[cache_key] = img.copy()
+                    if self._fp_call_count <= 10:
+                        print(f"  -> RING BUFFER HIT for Input-{active_input}")
+                    return img.copy()
+            
+            # STEP 3: FALLBACK — Check legacy scaled cache
+            cache_key = (active_input, size.width(), size.height())
+            scaled_cache = getattr(self, 'last_input_image_scaled', {})
+            cached_scaled = scaled_cache.get(cache_key)
+            if cached_scaled is not None and not cached_scaled.isNull():
+                if self._fp_call_count <= 10:
+                    print(f"  -> LEGACY CACHE HIT for {size.width()}x{size.height()}")
+                return cached_scaled.copy()
+            
+            if self._fp_call_count <= 10:
+                print(f"  -> CACHE MISS for {size.width()}x{size.height()}, cache has: {list(scaled_cache.keys())}")
+            
+            # STEP 4: FALLBACK — Get from legacy full-res cache and scale
+            full_res_cache = getattr(self, 'last_input_image', {})
+            img = full_res_cache.get(active_input)
+            if img is not None and not img.isNull():
+                # Fast scale if needed
+                if img.size() != size:
+                    if self._fp_call_count <= 3:
+                        print(f"  -> Legacy cache miss, scaled from {img.width()}x{img.height()} to {size.width()}x{size.height()}")
+                    img = img.scaled(
+                        size,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.FastTransformation
+                    )
+                # Cache and return
+                if not hasattr(self, 'last_input_image_scaled'):
+                    self.last_input_image_scaled = {}
+                self.last_input_image_scaled[cache_key] = img.copy()
+                return img.copy()
+            
+            # STEP 4: Fallback — try getting last frame from graphics output
+            if hasattr(self, '_graphics_output') and self._graphics_output is not None:
+                last_frame = getattr(self._graphics_output, '_last_frame', None)
+                if last_frame is not None and not last_frame.isNull():
+                    if last_frame.size() != size:
+                        last_frame = last_frame.scaled(
+                            size,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.FastTransformation
+                        )
+                    if self._fp_call_count <= 3:
+                        print(f"  -> Used fallback _last_frame from graphics output")
+                    # ✅ Apply overlay effects for streaming before returning
+                    last_frame = self._apply_frame_effects(last_frame)
+                    last_frame = _ensure_exact_size(last_frame)
+                    return last_frame
+            
+            # STEP 5: Return black frame if nothing available
+            if self._fp_call_count <= 3:
+                print(f"  -> No active frame, returning black")
+            black = QImage(size, QImage.Format.Format_RGBA8888)
+            black.fill(0)
+            return black
             
         except Exception as e:
-            print(f"Error rendering stream frame: {e}")
-            import traceback
-            traceback.print_exc()
+            # === DIAGNOSTIC: Frame provider error ===
+            _diag_error("Frame provider failed — stream will drop this frame",
+                       e,
+                       f"File: main.py → _provide_stream_frame() | "
+                       f"Active input: {active_input if 'active_input' in locals() else 'unknown'} | "
+                       f"Requested size: {size.width()}x{size.height()} | "
+                       f"Frame #{self._fp_call_count}")
             # Return black frame on error
-            img = QImage(size, QImage.Format.Format_RGBA8888)
-            img.fill(0)
-            return img
+            black = QImage(size, QImage.Format.Format_RGBA8888)
+            black.fill(0)
+            return black
     
     def toggle_audio_monitor(self):
         """Toggle audio monitor mute"""
@@ -5311,6 +9942,21 @@ Ready to load this media file."""
         finally:
             cb.blockSignals(False)
     
+    def _safe_set_fps_combo(self, fps_value: int):
+        """Safely update FPS combo box (avoids 'deleted' errors when dialog closes)."""
+        try:
+            if hasattr(self, 'fpsComboBox') and self.fpsComboBox is not None:
+                try:
+                    self.fpsComboBox.blockSignals(True)
+                    self.fpsComboBox.setCurrentText(f"{int(fps_value)} FPS")
+                finally:
+                    try:
+                        self.fpsComboBox.blockSignals(False)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    
     def on_fps_changed(self, text):
         """Handle FPS change with global FPS controller integration"""
         print(f"FPS changed to: {text}")
@@ -5444,15 +10090,98 @@ Ready to load this media file."""
     def update_record_status(self, status_text, color):
         """Update the record status text and color"""
         try:
-            if hasattr(self, 'recordStatusText'):
-                self.recordStatusText.setText(status_text)
-                self.recordStatusText.setStyleSheet(f"color: {color};")
-            else:
-                print(f"Record status update: {status_text}")
+            # Helper to check if a Qt widget is still alive
+            def _alive(w):
+                try:
+                    if w is None:
+                        return False
+                    # Accessing property safely will throw if deleted
+                    _ = w.objectName()
+                    return True
+                except Exception:
+                    return False
+
+            lbl = getattr(self, 'recordStatusText', None)
+            if _alive(lbl):
+                lbl.setText(status_text)
+                lbl.setStyleSheet(f"color: {color};")
+            
+            # Sync workspace record button
+            btn = getattr(self, 'record_action_btn', None)
+            if _alive(btn):
+                is_recording = False
+                try:
+                    rc = getattr(self, 'recorder_controller', None)
+                    if rc is not None and hasattr(rc, 'is_running'):
+                        is_recording = bool(rc.is_running())
+                    else:
+                        is_recording = bool(getattr(self, 'recording', False))
+                except Exception:
+                    is_recording = bool(getattr(self, 'recording', False))
+                btn.blockSignals(True)
+                btn.setChecked(is_recording)
+                if is_recording:
+                    btn.setText("STOP RECORDING")
+                    btn.setStyleSheet("""
+                        QPushButton {
+                            background-color: transparent;
+                            color: #ff4444;
+                            font-size: 18px;
+                            font-weight: bold;
+                            border-radius: 8px;
+                            border: 2px solid #ff4444;
+                        }
+                        QPushButton:hover { background-color: rgba(255, 68, 68, 0.1); }
+                    """)
+                else:
+                    btn.setText("START RECORDING")
+                    btn.setStyleSheet("""
+                        QPushButton {
+                            background-color: #ff3b30;
+                            color: white;
+                            font-size: 18px;
+                            font-weight: bold;
+                            border-radius: 8px;
+                            border: 2px solid #ff5b50;
+                        }
+                        QPushButton:hover { background-color: #ff5b50; }
+                    """)
+                btn.blockSignals(False)
+
+            # Sync main round record button icon/style
+            main_btn = getattr(self, 'recordRedCircle', None)
+            if _alive(main_btn):
+                try:
+                    rc = getattr(self, 'recorder_controller', None)
+                    is_recording = bool(rc.is_running()) if rc is not None and hasattr(rc, 'is_running') else bool(getattr(self, 'recording', False))
+                except Exception:
+                    is_recording = bool(getattr(self, 'recording', False))
+                try:
+                    if is_recording:
+                        main_btn.setIcon(self.get_icon("Stop.png"))
+                        main_btn.setStyleSheet("background-color: #ff0000; border-radius: 15px;")
+                    else:
+                        main_btn.setIcon(self.get_icon("Record.png"))
+                        main_btn.setStyleSheet("background-color: #404040; border-radius: 15px;")
+                except Exception:
+                    pass
+                
+             # Also update Status Bar
+            status_lbl = getattr(self, 'status_rec', None)
+            if _alive(status_lbl):
+                status_lbl.setText(status_text)
+                status_lbl.setStyleSheet(f"color: {color}; font-weight: bold;")
+                 
         except AttributeError:
             print(f"Record status update: {status_text}")
+    
+    def _on_record_toggled_workspace(self, checked):
+        """Handle toggle from workspace button"""
+        # We just trigger the main toggle logic
+        # The button visual state will be fixed by update_record_status if the action succeeds or fails
+        self.toggle_recording()
 
-    def _on_stream_status_changed(self, status: str):
+    def _on_stream_status_changed(self, status: str, stream_id: int | None = None):
         """Handle StreamController status updates and reflect them in the UI."""
         try:
             st = (status or '').lower()
@@ -5467,6 +10196,17 @@ Ready to load this media file."""
                 self.update_record_status("Ready", "#777777")
         except Exception as e:
             print(f"Status UI error: {e}")
+
+        # Stream workspace footer + log
+        try:
+            sid = int(stream_id) if stream_id is not None else None
+        except Exception:
+            sid = None
+        try:
+            if sid is not None and hasattr(self, '_update_stream_footer'):
+                self._update_stream_footer(sid, str(status or ''))
+        except Exception:
+            pass
     
     # Input panel methods
     def open_input1_settings(self):
@@ -5610,10 +10350,47 @@ Ready to load this media file."""
     def _on_camera_settings_changed(self, input_number: int, settings: dict):
         """Handle real-time camera settings changes."""
         try:
+            if not isinstance(settings, dict):
+                return
             from camera_processor import camera_processors
             
             # Apply settings to processor
             camera_processors[input_number].update_settings(settings)
+            
+            # Check if resolution changed (requires camera restart with new format)
+            try:
+                new_res = settings.get('resolution')
+                if new_res and isinstance(new_res, (tuple, list)) and len(new_res) >= 2:
+                    new_res = (int(new_res[0]), int(new_res[1]))
+                    prev_res_dict = getattr(self, '_prev_input_resolution', {})
+                    prev_res = prev_res_dict.get(input_number)
+                    
+                    if prev_res != new_res:
+                        print(f"[CAMERA] Resolution changed from {prev_res} to {new_res} for Input {input_number}")
+                        prev_res_dict[input_number] = new_res
+                        
+                        # Restart camera with new format
+                        if hasattr(self, 'qt_cameras') and input_number in self.qt_cameras:
+                            cam_obj = self.qt_cameras[input_number]
+                            if cam_obj and hasattr(cam_obj, 'cameraDevice'):
+                                dev = cam_obj.cameraDevice()
+                                # Reconstruct camera_info with new resolution and current settings
+                                fps_val = settings.get('fps', 60)
+                                try:
+                                    fps_val = int(float(fps_val))
+                                except (TypeError, ValueError):
+                                    fps_val = 60
+                                camera_info = {
+                                    'name': str(cam_obj.cameraDevice().description() if hasattr(dev, 'description') else ''),
+                                    'index': self.input_camera_indices.get(input_number, 0),
+                                    'device': dev,
+                                    'fps': fps_val,
+                                    'resolution': new_res,
+                                }
+                                print(f"[CAMERA] Restarting camera for Input {input_number} with resolution {new_res[0]}x{new_res[1]}")
+                                self.start_camera_capture(camera_info, input_number)
+            except Exception as e:
+                print(f"[CAMERA] Warning: Could not restart camera on resolution change: {e}")
             
             # Force refresh of current frame if this input is active
             if hasattr(self, 'current_output') and self.current_output == ('input', input_number):
@@ -5624,6 +10401,23 @@ Ready to load this media file."""
                         processed_img = camera_processors[input_number].process_frame(original_img)
                         if processed_img:
                             self._set_output_image(processed_img)
+
+            # Always apply FPS from dialog to output pipeline (honor user selection: 30, 60, etc.)
+            try:
+                fps_val = settings.get('fps')
+                if fps_val is not None:
+                    fps_value = int(float(fps_val))
+                    if fps_value > 0:
+                        app_config.set('ui.preview_fps', fps_value)
+                        if hasattr(self, '_graphics_output') and self._graphics_output is not None:
+                            self._graphics_output.set_target_fps(fps_value)
+                        if FPS_CONTROLLER_AVAILABLE:
+                            from fps_controller import set_global_fps
+                            set_global_fps(fps_value)
+                        # Defer fpsComboBox update to avoid "deleted" errors when dialog is closing
+                        QTimer.singleShot(50, lambda f=fps_value: self._safe_set_fps_combo(f))
+            except (TypeError, ValueError, Exception):
+                pass
 
             # If dialog requested auto output profile, apply detected resolution/FPS and set dropdown to 'Auto'
             if settings.get('output_profile_auto'):
@@ -5673,15 +10467,34 @@ Ready to load this media file."""
     def _on_camera_selected_in_dialog(self, input_number: int, dialog):
         """Handle camera selection in dialog."""
         try:
+            if not dialog:
+                return
             camera_device = dialog.camera_combo.currentData()
-            if camera_device:  # Only start if a real camera is selected (not "Select Camera...")
-                camera_info = {
-                    'name': dialog.camera_combo.currentText(),
-                    'index': 0,
-                    'device': camera_device
-                }
-                self.start_camera_capture(camera_info, input_number)
-                print(f"✅ Started camera capture for input {input_number}: {camera_info['name']}")
+            if not camera_device:  # "Select Camera..." selected
+                return
+            # Map combo index to device index
+            combo_index = dialog.camera_combo.currentIndex()
+            device_index = max(0, combo_index - 1)
+            # Safely get FPS/resolution from dialog (may fail if widgets destroyed)
+            fps_val, res_val = 60, (1920, 1080)
+            try:
+                settings = dialog.get_settings() if hasattr(dialog, 'get_settings') else {}
+                if isinstance(settings, dict):
+                    f = settings.get('fps')
+                    fps_val = int(float(f)) if f is not None else 60
+                    r = settings.get('resolution')
+                    res_val = r if isinstance(r, (tuple, list)) and len(r) >= 2 else (1920, 1080)
+            except Exception:
+                pass
+            camera_info = {
+                'name': str(getattr(dialog.camera_combo, 'currentText', lambda: '')() or ''),
+                'index': device_index,
+                'device': camera_device,
+                'fps': fps_val,
+                'resolution': res_val,
+            }
+            self.start_camera_capture(camera_info, input_number)
+            print(f"✅ Started camera capture for input {input_number}: {camera_info['name']} @ {camera_info['fps']}fps")
         except Exception as e:
             print(f"❌ Failed to start camera capture: {e}")
     
@@ -5737,18 +10550,29 @@ Ready to load this media file."""
         """Show enhanced text overlay settings dialog."""
         try:
             from text_overlay_settings_dialog import TextOverlaySettingsDialog
-            from text_overlay_renderer import text_overlay_renderer
             
             dialog = TextOverlaySettingsDialog(self)
             if dialog.exec() == dialog.DialogCode.Accepted:
                 settings = dialog.get_settings()
                 print("Applied text overlay settings:", settings)
-                
-                # ✅ ACTUALLY APPLY THE SETTINGS
-                text_overlay_renderer.update_settings(settings)
-                
-                # Refresh output preview to show the overlay
-                self.refresh_output_preview()
+                # Store to Preview-only settings; do not affect Program until CUT/AUTO
+                try:
+                    self.preview_text_settings = dict(settings)
+                except Exception:
+                    pass
+                # Refresh Preview panel
+                try:
+                    pv = getattr(self, 'active_preview_source', None)
+                    if pv and isinstance(pv, tuple) and len(pv) == 2:
+                        st, idx = pv[0], int(pv[1])
+                        frame = None
+                        if st == 'input':
+                            frame = self.last_input_image.get(idx) if hasattr(self, 'last_input_image') else None
+                        elif st == 'media':
+                            frame = self.last_media_image.get(idx) if hasattr(self, 'last_media_image') else None
+                        self._update_preview_monitor(frame, st, idx)
+                except Exception:
+                    pass
                 
                 # Show confirmation
                 from PyQt6.QtWidgets import QMessageBox
@@ -5762,14 +10586,51 @@ def main():
     """Main application entry point"""
     # Enable high DPI scaling; on Qt6 AA_UseHighDpiPixmaps may not exist, so guard it
     from PyQt6.QtGui import QGuiApplication
+    # Also import QSurfaceFormat for forcing default GL format on Windows
     try:
+        from PyQt6.QtGui import QSurfaceFormat
+    except Exception:
+        QSurfaceFormat = None
+    import os
+    try:
+        # Enable high DPI scaling before QApplication is created
+        enable_attr = getattr(Qt.ApplicationAttribute, 'AA_EnableHighDpiScaling', None)
+        if enable_attr is not None:
+            QGuiApplication.setAttribute(enable_attr, True)
         attr = getattr(Qt.ApplicationAttribute, 'AA_UseHighDpiPixmaps', None)
         if attr is not None:
             QGuiApplication.setAttribute(attr, True)
     except Exception:
         pass
+    # Prefer desktop GL on Windows to avoid software GL fallbacks (ANGLE) when possible
+    try:
+        if sys.platform.startswith('win'):
+            os.environ.setdefault('QT_OPENGL', 'desktop')
+    except Exception:
+        pass
+
+    # Set a default QSurfaceFormat requesting a modern core profile before creating QApplication
+    try:
+        if QSurfaceFormat is not None:
+            fmt = QSurfaceFormat()
+            try:
+                fmt.setVersion(3, 3)
+                fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
+            except Exception:
+                try:
+                    fmt.setVersion(3, 0)
+                except Exception:
+                    pass
+            try:
+                fmt.setSwapBehavior(QSurfaceFormat.SwapBehavior.DoubleBuffer)
+            except Exception:
+                pass
+            QSurfaceFormat.setDefaultFormat(fmt)
+    except Exception:
+        pass
+
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    
+
     app = QApplication(sys.argv)
     # Provide a safe substitution for missing Monospace fonts to silence alias warning
     try:
@@ -5786,14 +10647,62 @@ def main():
     # Create and show main window
     window = GoLiveStudio()
     window.show()
+
+    # --- Ensure all QTimers are started after QApplication is running ---
+    try:
+        # Start adaptive quality monitoring QTimer
+        if hasattr(quality_manager, 'start_monitoring'):
+            quality_manager.start_monitoring()
+        else:
+            print("[WARN] quality_manager has no start_monitoring() method; ensure QTimer is started if needed.")
+    except Exception as e:
+        print(f"[WARN] Could not start quality_manager monitoring: {e}")
+
+    # NOTE: If you use EnhancedCameraInput, call .start_stats_timer() on each instance after creation.
+
     # Ensure background processes are stopped before app quits
     try:
         app.aboutToQuit.connect(window.cleanup_on_exit)
     except Exception:
         pass
-    
+
     # Start event loop
     sys.exit(app.exec())
 
 if __name__ == "__main__":
-    main()
+    import traceback
+    print("\n" + "="*70, flush=True)
+    print(">>> GoLive Studio Launcher <<<", flush=True)
+    print("="*70, flush=True)
+    print(f"Python: {sys.version}", flush=True)
+    print(f"Working Dir: {os.getcwd()}", flush=True)
+    print("="*70 + "\n", flush=True)
+    sys.stdout.flush()
+    
+    try:
+        print("[STARTUP] Initializing main()...", flush=True)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        main()
+        print("[STARTUP] main() completed successfully", flush=True)
+    except SystemExit as se:
+        print(f"[STARTUP] SystemExit({se.code})", flush=True)
+        sys.exit(se.code if se.code else 0)
+    except Exception as e:
+        error_msg = f"FATAL ERROR: {type(e).__name__}: {e}\n\n{traceback.format_exc()}"
+        print("\n" + error_msg + "\n", flush=True)
+        sys.stderr.write(error_msg + "\n")
+        sys.stderr.flush()
+        sys.stdout.flush()
+        
+        # Try to show error dialog
+        try:
+            from PyQt6.QtWidgets import QApplication, QMessageBox
+            if not QApplication.instance():
+                app = QApplication(sys.argv)
+            else:
+                app = QApplication.instance()
+            QMessageBox.critical(None, "GoLive Studio - Startup Error", error_msg)
+        except Exception as gui_err:
+            print(f"[GUI ERROR] Could not show error dialog: {gui_err}", flush=True)
+        sys.exit(1)

@@ -18,8 +18,8 @@ def get_ffmpeg_path() -> str:
     Returns:
         str: Path to FFmpeg executable
     """
-    # Check environment variable set by main.py
-    env_path = os.environ.get('GOLIVE_FFMPEG_PATH')
+    # Check environment variable set by main.py (and a common override)
+    env_path = os.environ.get('GOLIVE_FFMPEG_PATH') or os.environ.get('FFMPEG_PATH')
     if env_path and os.path.exists(env_path):
         # Only use env path if it works
         try:
@@ -28,21 +28,29 @@ def get_ffmpeg_path() -> str:
         except Exception:
             pass
     
-    # Prefer system/Homebrew FFmpeg first: resolve absolute path if possible
+    # Prefer system FFmpeg first: resolve absolute path if possible
     try:
-        which_path = shutil.which('ffmpeg')
+        ffmpeg_name = 'ffmpeg.exe' if sys.platform.startswith('win') else 'ffmpeg'
+        which_path = shutil.which(ffmpeg_name) or shutil.which('ffmpeg')
         if which_path and os.path.exists(which_path):
             try:
                 if verify_ffmpeg(which_path):
                     return which_path
             except Exception:
                 pass
-        # Check common install locations (macOS/Homebrew and others)
-        common_candidates = [
-            '/opt/homebrew/bin/ffmpeg',
-            '/usr/local/bin/ffmpeg',
-            '/usr/bin/ffmpeg',
-        ]
+        # Check common install locations
+        if sys.platform.startswith('win'):
+            common_candidates = [
+                r'C:\\ffmpeg\\bin\\ffmpeg.exe',
+                r'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe',
+                r'C:\\Program Files (x86)\\ffmpeg\\bin\\ffmpeg.exe',
+            ]
+        else:
+            common_candidates = [
+                '/opt/homebrew/bin/ffmpeg',
+                '/usr/local/bin/ffmpeg',
+                '/usr/bin/ffmpeg',
+            ]
         for p in common_candidates:
             if os.path.exists(p) and os.access(p, os.X_OK):
                 try:
@@ -103,8 +111,11 @@ def _find_bundled_ffmpeg() -> Optional[str]:
             # Windows: ffmpeg.exe in various locations
             candidates.extend([
                 os.path.join(base_dir, 'ffmpeg', 'ffmpeg.exe'),
+                os.path.join(base_dir, 'ffmpeg', 'ffmpeg'),
                 os.path.join(base_dir, 'ffmpeg.exe'),
+                os.path.join(base_dir, 'ffmpeg'),
                 os.path.join(os.path.dirname(base_dir), 'ffmpeg', 'ffmpeg.exe'),
+                os.path.join(os.path.dirname(base_dir), 'ffmpeg', 'ffmpeg'),
             ])
         else:
             # macOS/Linux: ffmpeg binary

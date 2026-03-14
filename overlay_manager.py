@@ -2,7 +2,7 @@ from __future__ import annotations
 import os
 from typing import Optional, Tuple, Dict
 from PyQt6.QtGui import QImage, QPainter, QColor
-from PyQt6.QtCore import QSize
+from PyQt6.QtCore import QSize, Qt
 
 
 class EffectManager:
@@ -155,7 +155,8 @@ class EffectManager:
         final_mask.fill(QColor(0, 0, 0, 0))
         for y in range(h):
             for x in range(w):
-                a = mask_up.pixelColor(x, y).red()  # grayscale
+                # mask_up is Format_Alpha8; the alpha channel carries the mask value.
+                a = mask_up.pixelColor(x, y).alpha()
                 if a >= 128:
                     final_mask.setPixelColor(x, y, QColor(255, 255, 255, 255))
 
@@ -349,6 +350,8 @@ class EffectManager:
         """Return a new QImage of target_size with overlay applied over base.
         If base is None, draw a black background underneath.
         """
+        # Debug logging removed for performance
+        
         # Prepare canvas
         result = QImage(target_size, QImage.Format.Format_ARGB32)
         result.fill(QColor(0, 0, 0, 255))
@@ -356,7 +359,8 @@ class EffectManager:
         # 1) Draw video into result (either full or inside detected rect)
         p = QPainter(result)
         try:
-            if base and not base.isNull():
+            # NOTE: Do not rely on QImage truthiness; explicit None/null checks are required.
+            if base is not None and (not hasattr(base, 'isNull') or not base.isNull()):
                 # Compute target rect for base: prefer normalized opening rect mapped via scaled geometry
                 key = (target_size.width(), target_size.height())
                 geom = self._scaled_geom.get(key)
@@ -399,10 +403,25 @@ class EffectManager:
         # 3) Draw overlay on top
         overlay = self._get_scaled_overlay(target_size)
         if overlay and not overlay.isNull():
+            # Some effect PNGs use a white/opaque "opening" region instead of actual transparency.
+            # For preview compositing, punch the opening out of the overlay using the same opening mask
+            # so the video inside the hole remains visible.
+            overlay_to_draw = overlay
+            try:
+                if mask and not mask.isNull():
+                    overlay_to_draw = overlay.copy()
+                    p_ov = QPainter(overlay_to_draw)
+                    try:
+                        p_ov.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
+                        p_ov.drawImage(0, 0, mask)
+                    finally:
+                        p_ov.end()
+            except Exception:
+                overlay_to_draw = overlay
             p3 = QPainter(result)
             try:
                 p3.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
-                p3.drawImage(0, 0, overlay)
+                p3.drawImage(0, 0, overlay_to_draw)
             finally:
                 p3.end()
 

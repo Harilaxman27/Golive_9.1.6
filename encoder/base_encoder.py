@@ -3,7 +3,7 @@ GoLive Studio - Base Encoder Abstract Interface
 Defines the abstract interface for video encoders
 """
 
-from abc import ABC, abstractmethod
+from abc import ABC, abstractmethod, ABCMeta
 from typing import Optional, Dict, Any, Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -106,7 +106,11 @@ class EncoderCapabilities:
         return f"{self.name} ({self.encoder_type.value})"
 
 
-class BaseEncoder(QObject, ABC):
+class QABCMeta(type(QObject), ABCMeta):
+    pass
+
+
+class BaseEncoder(QObject, ABC, metaclass=QABCMeta):
     """
     Abstract base class for video encoders
     

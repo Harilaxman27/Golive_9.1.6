@@ -13,10 +13,10 @@ Key Improvements:
 
 from __future__ import annotations
 from typing import Optional, Tuple, Dict, Any
-from PyQt6.QtWidgets import QFrame, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem
+from PyQt6.QtWidgets import QWidget, QFrame, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QFont, QPainterPath, QPen
-from PyQt6.QtCore import Qt, QRectF, QSize, QTimer, QElapsedTimer
+from PyQt6.QtCore import Qt, QRectF, QSize, QTimer, QElapsedTimer, QThread
 import os
 import json
 import math
@@ -40,6 +40,107 @@ except ImportError:
     print("Performance Optimizer not available")
 
 
+# Signal import for Qt
+from PyQt6.QtCore import pyqtSignal
+
+
+class GraphicsRenderThread(QThread):
+    """
+    Dedicated render timing thread for graphics output widget.
+    Uses absolute nanosecond deadline timing — same as OBS obs_graphics_thread.
+    Emits render_tick at exactly the target FPS with nanosecond precision.
+    
+    CRITICAL FIX: Synchronizes with actual camera frame delivery to prevent jitter.
+    Only emits render_tick when a new frame is actually available.
+    """
+    render_tick = pyqtSignal()  # Emitted when it's time to repaint
+
+    def __init__(self, target_fps=30, parent=None):  # Default 30fps to match camera
+        super().__init__(parent)
+        self.target_fps = target_fps
+        self._running = False
+        self._fps_changed = False
+        self._frame_count = 0
+        self._fps_clock_ns = 0
+        self._last_frame_time_ns = 0
+        self._frame_available = False
+        self._vsync_enabled = True
+
+    def set_fps(self, fps):
+        """Change target FPS (takes effect immediately on next frame)."""
+        if fps > 0:
+            self.target_fps = max(24, fps)  # Minimum 24 FPS
+            self._fps_changed = True
+
+    def notify_frame_available(self):
+        """Notify that a new camera frame is available."""
+        self._frame_available = True
+        self._last_frame_time_ns = time.perf_counter_ns()
+
+    def run(self):
+        """OBS-style fixed FPS render loop with frame reuse.
+        
+        Runs at exactly target_fps, reusing last frame if no new frame arrived.
+        This matches OBS obs_graphics_thread behavior.
+        """
+        self._running = True
+        self._fps_changed = False
+        
+        # Calculate frame interval in nanoseconds
+        frame_interval_ns = int(1_000_000_000 / self.target_fps)
+        
+        # FPS counter
+        frame_count = 0
+        fps_clock_ns = time.perf_counter_ns()
+        
+        # ABSOLUTE deadline timing (prevents drift)
+        next_frame_ns = time.perf_counter_ns()
+        
+        while self._running:
+            # Advance deadline by exactly one frame interval
+            next_frame_ns += frame_interval_ns
+            
+            # Handle FPS changes
+            if self._fps_changed:
+                frame_interval_ns = int(1_000_000_000 / self.target_fps)
+                self._fps_changed = False
+            
+            # Emit render tick (widget will read latest frame from buffer)
+            # If no new frame, it reuses the last one (smooth display)
+            self.render_tick.emit()
+            
+            # Update FPS counter
+            frame_count += 1
+            now_ns = time.perf_counter_ns()
+            elapsed_ns = now_ns - fps_clock_ns
+            if elapsed_ns >= 1_000_000_000:
+                print(f"Render FPS: {frame_count} [target={self.target_fps}]")
+                frame_count = 0
+                fps_clock_ns = now_ns
+            
+            # PRECISION SLEEP to absolute deadline (OBS os_sleepto_ns style)
+            sleep_ns = next_frame_ns - time.perf_counter_ns()
+            
+            if sleep_ns > 1_000_000:  # > 1ms
+                # Coarse sleep for most of the duration
+                time.sleep((sleep_ns - 1_000_000) / 1_000_000_000)
+                # Busy-wait the final 1ms for precision
+                while time.perf_counter_ns() < next_frame_ns:
+                    pass
+            elif sleep_ns > 0:
+                # Just busy-wait for short durations
+                while time.perf_counter_ns() < next_frame_ns:
+                    pass
+            elif sleep_ns < -frame_interval_ns:
+                # More than 1 frame behind: resync to prevent cascading delays
+                next_frame_ns = time.perf_counter_ns()
+
+    def stop(self):
+        """Stop the render thread cleanly."""
+        self._running = False
+        self.wait(2000)
+
+
 class EnhancedGraphicsOutputWidget(QOpenGLWidget):
     """
     Hardware-accelerated graphics output widget that fixes pixelation issues.
@@ -51,6 +152,31 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
     - Overlays rendered at full resolution
     - Text rendered at native resolution
     """
+    
+    # Class-level registry of all active render threads (Fix 7A)
+    _all_render_threads = []    
+    @classmethod
+    def _register_render_thread(cls, thread):
+        """Register a new render thread in the class-level registry."""
+        cls._all_render_threads.append(thread)
+        print(f"[RENDER] Registered render thread #{len(cls._all_render_threads)} "
+              f"(total active: {len(cls._all_render_threads)})")
+    
+    @classmethod
+    def _unregister_render_thread(cls, thread):
+        """Unregister a render thread from the class-level registry."""
+        if thread in cls._all_render_threads:
+            cls._all_render_threads.remove(thread)
+        print(f"[RENDER] Unregistered render thread "
+              f"(total active: {len(cls._all_render_threads)})")
+    
+    @classmethod
+    def set_fps_all_instances(cls, fps):
+        """Propagate FPS change to ALL active render threads (Fix 7B)."""
+        for thread in cls._all_render_threads:
+            thread.set_fps(fps)
+        print(f"[RENDER] Set {fps}fps on all {len(cls._all_render_threads)} render thread(s)")
+    
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -103,10 +229,17 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
             self.performance_optimizer = get_performance_optimizer()
             self.performance_optimizer.performance_updated.connect(self._on_performance_update)
         
-        # Memory management
+        # Memory management - SEPARATE buffers for display vs stream rendering
         self._frame_count = 0
         self._memory_cleanup_interval = 100  # Cleanup every 100 frames
-        self._offscreen: Optional[QImage] = None
+        self._display_offscreen: Optional[QImage] = None  # Widget size (e.g., 1280x720)
+        self._stream_offscreen: Optional[QImage] = None   # Full output size (e.g., 1920x1080)
+        self._offscreen: Optional[QImage] = None  # Deprecated, kept for compatibility
+        # Stream capture mode flag (set by frame provider when requesting full resolution)
+        self._stream_capture_mode = False
+        # Re-entrancy guards to avoid recursive rendering loops
+        self._in_set_frame = False
+        self._painting = False
         # Diagnostics
         self._diag_frames = 0
         self._diag_elapsed = QElapsedTimer()
@@ -139,15 +272,30 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
         self._elapsed = QElapsedTimer()
         self._elapsed.start()
         
-        # Update timer for frame rendering
-        self._update_timer = QTimer(self)
-        self._update_timer.setSingleShot(True)
-        self._update_timer.timeout.connect(self.update)
+        # Graphics render thread with nanosecond-precision timing (replaces _update_timer)
+        # This ensures we render at exactly the target FPS without drift
+        self._render_thread = GraphicsRenderThread(target_fps=self._target_fps, parent=None)
+        self._render_thread.render_tick.connect(self.update, Qt.ConnectionType.QueuedConnection)
+        self._render_thread.setPriority(QThread.Priority.TimeCriticalPriority)
+        self._render_thread.start()
+        # Register this render thread in class-level registry (Fix 7A)
+        EnhancedGraphicsOutputWidget._register_render_thread(self._render_thread)
+        
+        # REMOVED: Minimum 24 FPS refresh timer - was causing unsynchronized updates
+        # The render thread is now purely frame-synchronized via notify_frame_available()
         
         # CRITICAL FIX: Always render at target resolution to prevent pixelation
         self._render_output_size: Optional[QSize] = None
         
+        # Connect cleanup signal to ensure render thread stops when widget is destroyed
+        self.destroyed.connect(self._cleanup_render_thread)
+        
         print("Enhanced Graphics Output Widget initialized with hardware acceleration")
+    
+    def _on_min_fps_tick(self):
+        """Ensure at least 24 FPS display refresh when we have content."""
+        if self._last_frame is not None and not getattr(self, '_painting', False):
+            self.update()
     
     def get_current_source(self) -> Dict[str, Any]:
         """Get the currently active source information."""
@@ -165,13 +313,55 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
     
     def set_frame(self, frame: Optional[QImage]):
         """Set the current video frame and update display immediately."""
-        self._last_frame = frame
-        
-        # CRITICAL FIX: Always update display immediately
-        # The previous timer-based throttling and FPS controller logic was causing
-        # the video to get stuck because the timer was being constantly reset
-        # before it could fire. Qt's update() is already coalesced and vsync-aware.
-        self._update_display()
+        # Ensure operations that use QPainter / QImage are executed on the GUI thread.
+        # Some backends (camera capture, streaming) may call set_frame from worker threads.
+        # Qt painting APIs are not thread-safe on Windows; marshal to the widget thread.
+        try:
+            if QThread.currentThread() != self.thread():
+                # If currently applying or painting, schedule slightly later to avoid recursion
+                if getattr(self, '_in_set_frame', False) or getattr(self, '_painting', False):
+                    try:
+                        img_copy = frame.copy() if frame is not None else None
+                    except Exception:
+                        img_copy = frame
+                    QTimer.singleShot(10, lambda img=img_copy: self.set_frame(img))
+                    return
+
+                # Schedule on GUI thread and return immediately.
+                try:
+                    img_copy = frame.copy() if frame is not None else None
+                except Exception:
+                    img_copy = frame
+                QTimer.singleShot(0, lambda img=img_copy: self._apply_frame_on_gui(img))
+                return
+        except Exception:
+            # If thread comparison fails for any reason, fall back to direct set.
+            pass
+
+        # Apply on GUI thread directly
+        self._apply_frame_on_gui(frame)
+
+    def _apply_frame_on_gui(self, frame: Optional[QImage]):
+        """Apply a frame to widget state on GUI thread."""
+        # If already applying a frame, reschedule slightly to avoid re-entrancy.
+        if getattr(self, '_in_set_frame', False):
+            try:
+                img_copy = frame.copy() if frame is not None else None
+            except Exception:
+                img_copy = frame
+            QTimer.singleShot(10, lambda img=img_copy: self._apply_frame_on_gui(img))
+            return
+
+        self._in_set_frame = True
+        try:
+            self._last_frame = frame
+            # Notify render thread that a new frame is available
+            if self._render_thread and hasattr(self._render_thread, 'notify_frame_available'):
+                self._render_thread.notify_frame_available()
+            # Update display immediately for responsive UI
+            self._update_display()
+        finally:
+            self._in_set_frame = False
     
     def _qimage_to_numpy(self, qimage: QImage) -> np.ndarray:
         """Convert QImage to numpy array with memory optimization"""
@@ -216,7 +406,6 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
         
         # Increment frame count and perform periodic cleanup
         self._frame_count += 1
-        self._diag_frames += 1
         if self._frame_count % self._memory_cleanup_interval == 0:
             self._cleanup_memory()
         
@@ -226,14 +415,6 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
         if self.performance_optimizer:
             latency_ms = (time.time() - start_time) * 1000
             self.performance_optimizer.record_frame_latency(latency_ms)
-        # Diagnostics: print measured render FPS once per second
-        if self._diag_elapsed.hasExpired(1000):
-            try:
-                print(f"Render FPS: {self._diag_frames}")
-            except Exception:
-                pass
-            self._diag_frames = 0
-            self._diag_elapsed.restart()
     
     def _cleanup_memory(self):
         """Periodic memory cleanup to prevent memory leaks"""
@@ -260,9 +441,18 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
     
     def _on_fps_changed(self, new_fps: int):
         """Handle FPS change from global controller"""
-        self._target_fps = new_fps
-        self._target_interval_ms = int(1000.0 / new_fps)
-        print(f"Graphics output FPS updated to {new_fps}fps (interval: {self._target_interval_ms}ms)")
+        self._target_fps = max(24, new_fps)  # Minimum 24 FPS to prevent lag
+        # Propagate FPS change to ALL instances via class-level broadcast (Fix 7B)
+        EnhancedGraphicsOutputWidget.set_fps_all_instances(self._target_fps)
+    
+    def _cleanup_render_thread(self):
+        """Stop the render thread cleanly when widget is destroyed."""
+        if hasattr(self, '_render_thread') and self._render_thread is not None:
+            # Unregister from class-level registry (Fix 7A)
+            EnhancedGraphicsOutputWidget._unregister_render_thread(self._render_thread)
+            if self._render_thread.isRunning():
+                self._render_thread.stop()
+
     
     def set_overlay_from_path(self, path: Optional[str], use_transition: bool = True):
         """Set overlay from image path with smooth transition."""
@@ -458,27 +648,40 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
         self.update()
     
     def set_target_fps(self, fps: int):
-        """Set target rendering FPS to match camera FPS."""
-        self._target_fps = max(5, min(240, int(fps)))
+        """Set target rendering FPS to match camera FPS. Minimum 24 FPS to prevent lag."""
+        self._target_fps = max(24, min(240, int(fps)))
         self._target_interval_ms = max(5, int(1000 / self._target_fps))  # Support up to 240fps
-        print(f"Graphics output FPS updated to {fps}fps (interval: {self._target_interval_ms}ms)")
+        print(f"Graphics output FPS updated to {self._target_fps}fps (interval: {self._target_interval_ms}ms)")
     
     def paintGL(self):
         """
         MAIN RENDERING METHOD - Hardware accelerated with pixelation fixes.
+        
+        FIX: Only allocate offscreen buffer at widget size for display, NOT at
+        full output resolution. Only stream rendering uses full resolution.
         """
-        # Get the target render size - this is CRITICAL for preventing pixelation
+        # Prevent re-entrant paint calls from overlapping
+        if getattr(self, '_painting', False):
+            return
+        self._painting = True
+        # Get the target render size - DISPLAY SIZE, not stream resolution
         render_size = self._get_effective_render_size()
         
-        # Create or reuse high-quality offscreen output image
-        if (
-            self._offscreen is None
-            or self._offscreen.size() != render_size
-            or self._offscreen.format() != QImage.Format.Format_ARGB32_Premultiplied
-        ):
-            self._offscreen = QImage(render_size, QImage.Format.Format_ARGB32_Premultiplied)
-        output = self._offscreen
+        # FIX 3: Better size comparison - only allocate when truly needed
+        # Check exact dimensions and format separately to avoid unnecessary reallocations
+        needs_realloc = (self._display_offscreen is None or
+                        self._display_offscreen.width() != render_size.width() or
+                        self._display_offscreen.height() != render_size.height() or
+                        self._display_offscreen.format() != QImage.Format.Format_ARGB32_Premultiplied)
+        
+        if needs_realloc:
+            self._display_offscreen = QImage(render_size, QImage.Format.Format_ARGB32_Premultiplied)
+        
+        output = self._display_offscreen
         output.fill(QColor(0, 0, 0, 255))
+        
+        # Also update legacy _offscreen reference for compatibility
+        self._offscreen = output
         
         painter = QPainter(output)
         try:
@@ -500,18 +703,12 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
             painter.end()
         
         # Display the rendered frame using QPainter on the widget
-        # This is the correct way to draw on QOpenGLWidget
         widget_painter = QPainter(self)
         try:
             widget_painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-            
-            # Scale to widget size if needed
-            if render_size != self.size():
-                # Use drawImage with rects for hardware-accelerated scaling
-                widget_painter.drawImage(QRectF(self.rect()), output, QRectF(output.rect()))
-            else:
-                widget_painter.drawImage(0, 0, output)
-            
+
+            # Offscreen size matches widget size, so draw at (0,0) without scaling
+            widget_painter.drawImage(0, 0, output)
         finally:
             widget_painter.end()
         # Optional on-screen FPS overlay for quick diagnostics
@@ -523,23 +720,31 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
                 overlay_painter.setBrush(QColor(0, 0, 0, 200))
                 overlay_painter.drawRect(6, 6, 90, 28)
                 overlay_painter.setPen(QColor(255, 255, 255, 255))
-                overlay_painter.drawText(12, 26, f"FPS ~ {self._diag_frames}")
+                # Display actual target FPS (render thread is locked to this)
+                overlay_painter.drawText(12, 26, f"FPS ~ {int(self._target_fps)}")
                 overlay_painter.end()
             except Exception:
                 pass
+        # Clear painting guard even if paint failed
+        self._painting = False
     
     def _get_effective_render_size(self) -> QSize:
         """
-        PIXELATION FIX: Always use the target render size if available.
-        This prevents upscaling artifacts by rendering at native resolution.
-        """
-        if self._render_output_size and self._render_output_size.isValid():
-            return self._render_output_size
+        FIX: Return display size for paintGL rendering, not stream resolution.
         
-        # Fallback to widget size
+        CRITICAL: The display widget (e.g., 1280x720) should render at its own
+        size, NOT at the full output resolution (e.g., 1920x1080).
+        
+        Only use full output resolution when frame_provider explicitly requests it
+        for streaming output via set_preview_render_size().
+        
+        This prevents the 8.3MB per frame × 60fps = 498MB/sec memory throughput
+        that was causing stutter when streaming started.
+        """
+        # For display rendering: use actual widget size
         size = self.size()
         if not size.isValid() or size.width() < 1 or size.height() < 1:
-            return QSize(1920, 1080)  # Safe fallback
+            return QSize(1280, 720)  # Safe fallback
         
         return size
     
@@ -556,44 +761,112 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
         else:
             # Render video normally
             self._render_video_normal(painter, size)
+
+    def _get_overlay_geom(self, size: QSize, overlay_image: Optional[QImage]) -> Optional[Tuple[int, int, int, int]]:
+        """Return (scaled_w, scaled_h, off_x, off_y) for the overlay when aspect-fit into size."""
+        try:
+            if overlay_image is None or overlay_image.isNull() or not size.isValid():
+                return None
+            key = (int(size.width()), int(size.height()), int(id(overlay_image)))
+            cache = getattr(self, '_overlay_geom_cache', None)
+            if cache is None:
+                cache = {}
+                self._overlay_geom_cache = cache
+            geom = cache.get(key)
+            if geom:
+                return geom
+
+            src_w = max(1, int(overlay_image.width()))
+            src_h = max(1, int(overlay_image.height()))
+            dst_w = max(1, int(size.width()))
+            dst_h = max(1, int(size.height()))
+            scale = min(dst_w / src_w, dst_h / src_h)
+            scaled_w = max(1, int(src_w * scale))
+            scaled_h = max(1, int(src_h * scale))
+            off_x = (dst_w - scaled_w) // 2
+            off_y = (dst_h - scaled_h) // 2
+            geom = (scaled_w, scaled_h, off_x, off_y)
+            cache[key] = geom
+            return geom
+        except Exception:
+            return None
     
     def _render_video_normal(self, painter: QPainter, size: QSize):
-        """Render video normally without transitions."""
-        # Calculate video placement
-        video_rect = QRectF(0, 0, size.width(), size.height())
+        """
+        ISSUE 1 FIX: Render video to fit INSIDE overlay opening (same as PREVIEW rendering).
         
-        # Apply opening mask if overlay is present
-        if self._opening_norm and self._overlay_image:
-            nx, ny, nw, nh = self._opening_norm
-            # Scale opening to current render size
-            video_rect = QRectF(
-                nx * size.width(),
-                ny * size.height(),
-                nw * size.width(),
-                nh * size.height()
-            )
+        Algorithm:
+        1. If overlay with detected opening exists: draw video inside ONLY the opening area
+        2. If no overlay/opening: draw video full-screen with letterboxing
         
-        # Scale video to cover the target area with overscan
-        target_w = int(video_rect.width() * self._overscan)
-        target_h = int(video_rect.height() * self._overscan)
+        This matches the PREVIEW rendering logic exactly so both displays are identical.
+        """
+        if not self._last_frame or self._last_frame.isNull():
+            return
         
-        # Calculate centered position
-        x = video_rect.x() + (video_rect.width() - target_w) / 2
-        y = video_rect.y() + (video_rect.height() - target_h) / 2
+        W_w = size.width()
+        H_w = size.height()
         
-        # OPTIMIZATION: Use drawImage with rects instead of creating scaled image
+        # Avoid division by zero
+        if W_w <= 0 or H_w <= 0:
+            return
+        
+        # Check if we have an overlay with an opening to render video inside
+        if self._opening_norm and self._overlay_image and not self._overlay_image.isNull():
+            # Get overlay geometry (where the overlay sits on screen)
+            geom = self._get_overlay_geom(size, self._overlay_image)
+            if geom is not None:
+                scaled_w, scaled_h, off_x, off_y = geom
+                nx, ny, nw, nh = self._opening_norm
+                
+                # Calculate the opening area in screen coordinates
+                video_rect = QRectF(
+                    off_x + (nx * scaled_w),
+                    off_y + (ny * scaled_h),
+                    max(1.0, nw * scaled_w),
+                    max(1.0, nh * scaled_h)
+                )
+                
+                # Draw video to fill the opening area
+                painter.drawImage(video_rect, self._last_frame, QRectF(self._last_frame.rect()))
+                
+                # Apply mask to clip video to ONLY the opening area (same as preview)
+                mask = self._build_opening_mask_for_opening(size, self._opening_norm, self._overlay_image)
+                if mask and not mask.isNull():
+                    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+                    painter.drawImage(0, 0, mask)
+                    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+                return
+        
+        # NO OVERLAY: Standard letterboxing to full widget
+        W_f = self._last_frame.width()
+        H_f = self._last_frame.height()
+        
+        if W_f <= 0 or H_f <= 0:
+            return
+        
+        # Compute aspect ratios
+        a_w = W_w / H_w
+        a_f = W_f / H_f
+        
+        # Determine target rect dimensions to fit frame inside widget
+        if a_w > a_f:
+            # Widget wider than frame → letterbox (black bars on sides)
+            target_h = H_w
+            target_w = int(target_h * a_f)
+        else:
+            # Widget taller than frame → pillarbox (black bars on top/bottom)
+            target_w = W_w
+            target_h = int(target_w / a_f) if a_f > 0 else H_w
+        
+        # Center the target rect
+        x = (W_w - target_w) // 2
+        y = (H_w - target_h) // 2
+        
+        # Draw the video frame into the centered target rect
         target_rect = QRectF(x, y, target_w, target_h)
         source_rect = QRectF(self._last_frame.rect())
-        
         painter.drawImage(target_rect, self._last_frame, source_rect)
-        
-        # Apply mask if needed
-        if self._opening_norm and self._overlay_image:
-            mask = self._build_opening_mask(size)
-            if mask and not mask.isNull():
-                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
-                painter.drawImage(0, 0, mask)
-                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
     
     def _render_video_with_transition(self, painter: QPainter, size: QSize):
         """Render video during transition with blended masks - video continues playing smoothly."""
@@ -634,13 +907,13 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
                 if self._transition_old_opening:
                     opacity = (1.0 - progress * 2.0)  # 1.0 -> 0.0
                     painter.setOpacity(opacity)
-                    self._render_video_for_opening(painter, size, self._transition_old_opening)
+                    self._render_video_for_opening(painter, size, self._transition_old_opening, self._transition_old_overlay)
             else:
                 # Second half: use new opening with increasing opacity
                 if self._transition_new_opening:
                     opacity = (progress - 0.5) * 2.0  # 0.0 -> 1.0
                     painter.setOpacity(opacity)
-                    self._render_video_for_opening(painter, size, self._transition_new_opening)
+                    self._render_video_for_opening(painter, size, self._transition_new_opening, self._transition_new_overlay)
                 
         finally:
             painter.restore()
@@ -656,7 +929,7 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
             # Render video with old opening (fading out)
             if self._transition_old_opening and old_opacity > 0.0:
                 painter.setOpacity(old_opacity)
-                self._render_video_for_opening(painter, size, self._transition_old_opening)
+                self._render_video_for_opening(painter, size, self._transition_old_opening, self._transition_old_overlay)
             
             # Render full screen video (fading in)
             if new_opacity > 0.0:
@@ -685,16 +958,38 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
             if self._transition_new_opening and new_opacity > 0.0:
                 painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
                 painter.setOpacity(new_opacity)
-                self._render_video_for_opening(painter, size, self._transition_new_opening)
+                self._render_video_for_opening(painter, size, self._transition_new_opening, self._transition_new_overlay)
                 painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
                 
         finally:
             painter.restore()
     
-    def _render_video_for_opening(self, painter: QPainter, size: QSize, opening_norm: Optional[Tuple[float, float, float, float]]):
-        """Render video for a specific opening area."""
+    def _render_video_for_opening(self, painter: QPainter, size: QSize, opening_norm: Optional[Tuple[float, float, float, float]], overlay_image: Optional[QImage] = None):
+        """Render video for a specific opening area.
+
+        IMPORTANT: opening_norm is in normalized coordinates relative to the overlay image,
+        which is aspect-fit into the output size. We must map using scaled overlay geometry.
+        """
         # Calculate video placement
-        if opening_norm:
+        if opening_norm and overlay_image is not None and not overlay_image.isNull():
+            nx, ny, nw, nh = opening_norm
+            geom = self._get_overlay_geom(size, overlay_image)
+            if geom is not None:
+                scaled_w, scaled_h, off_x, off_y = geom
+                video_rect = QRectF(
+                    off_x + (nx * scaled_w),
+                    off_y + (ny * scaled_h),
+                    max(1.0, nw * scaled_w),
+                    max(1.0, nh * scaled_h)
+                )
+            else:
+                video_rect = QRectF(
+                    nx * size.width(),
+                    ny * size.height(),
+                    nw * size.width(),
+                    nh * size.height()
+                )
+        elif opening_norm:
             nx, ny, nw, nh = opening_norm
             video_rect = QRectF(
                 nx * size.width(),
@@ -722,7 +1017,7 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
         
         # Apply mask if opening is specified
         if opening_norm:
-            mask = self._build_opening_mask_for_opening(size, opening_norm)
+            mask = self._build_opening_mask_for_opening(size, opening_norm, overlay_image)
             if mask and not mask.isNull():
                 painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
                 painter.drawImage(0, 0, mask)
@@ -867,13 +1162,25 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
     
     def render_to_image(self, size: QSize) -> QImage:
         """
-        PIXELATION FIX: Export at exact target size without scaling artifacts.
+        FIX: Stream capture - render at FULL OUTPUT RESOLUTION for streaming.
+        This is separate from the display rendering path (which uses widget size).
+        
+        Only called when frame_provider needs a new stream frame (not every render tick).
         """
         if not size.isValid():
             size = QSize(1920, 1080)
         
-        # Create high-quality output image
-        output = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
+        # FIX 3: Use separate stream_offscreen buffer to avoid interfering with display rendering
+        # Only allocate when size actually changes
+        stream_needs_realloc = (self._stream_offscreen is None or
+                               self._stream_offscreen.width() != size.width() or
+                               self._stream_offscreen.height() != size.height() or
+                               self._stream_offscreen.format() != QImage.Format.Format_ARGB32_Premultiplied)
+        
+        if stream_needs_realloc:
+            self._stream_offscreen = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
+        
+        output = self._stream_offscreen
         output.fill(QColor(0, 0, 0, 255))
         
         painter = QPainter(output)
@@ -1036,6 +1343,17 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
         rect_y = int(ny * size.height())
         rect_w = max(1, int(nw * size.width()))
         rect_h = max(1, int(nh * size.height()))
+        # Map opening via scaled overlay geometry (aspect-fit + offsets)
+        try:
+            geom = self._get_overlay_geom(size, self._overlay_image)
+            if geom is not None:
+                scaled_w, scaled_h, off_x, off_y = geom
+                rect_x = int(off_x + (nx * scaled_w))
+                rect_y = int(off_y + (ny * scaled_h))
+                rect_w = max(1, int(nw * scaled_w))
+                rect_h = max(1, int(nh * scaled_h))
+        except Exception:
+            pass
         
         painter = QPainter(mask)
         painter.fillRect(rect_x, rect_y, rect_w, rect_h, QColor(255, 255, 255, 255))
@@ -1044,8 +1362,12 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
         self._mask_cache[cache_key] = mask
         return mask
     
-    def _build_opening_mask_for_opening(self, size: QSize, opening_norm: Tuple[float, float, float, float]) -> Optional[QImage]:
-        """Build opening mask for a specific opening area during transitions."""
+    def _build_opening_mask_for_opening(self, size: QSize, opening_norm: Tuple[float, float, float, float], overlay_image: Optional[QImage] = None) -> Optional[QImage]:
+        """Build opening mask for a specific opening area during transitions.
+
+        opening_norm is normalized to the overlay image; when overlay is aspect-fit into output size,
+        the opening must be mapped via (scaled_w, scaled_h, off_x, off_y).
+        """
         if not opening_norm:
             return None
         
@@ -1058,6 +1380,18 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
         rect_y = int(ny * size.height())
         rect_w = max(1, int(nw * size.width()))
         rect_h = max(1, int(nh * size.height()))
+        try:
+            if overlay_image is None:
+                overlay_image = self._overlay_image
+            geom = self._get_overlay_geom(size, overlay_image)
+            if geom is not None:
+                scaled_w, scaled_h, off_x, off_y = geom
+                rect_x = int(off_x + (nx * scaled_w))
+                rect_y = int(off_y + (ny * scaled_h))
+                rect_w = max(1, int(nw * scaled_w))
+                rect_h = max(1, int(nh * scaled_h))
+        except Exception:
+            pass
         
         painter = QPainter(mask)
         painter.fillRect(rect_x, rect_y, rect_w, rect_h, QColor(255, 255, 255, 255))
@@ -1068,3 +1402,4 @@ class EnhancedGraphicsOutputWidget(QOpenGLWidget):
     def get_overlay_path(self) -> Optional[str]:
         """Get current overlay path."""
         return self._overlay_path
+

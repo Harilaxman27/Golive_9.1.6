@@ -75,6 +75,7 @@ class PerformanceMonitor(QObject):
         self.monitor_timer = QTimer(self)
         self.monitor_timer.timeout.connect(self._collect_metrics)
         self.monitor_interval = 1000  # 1 second
+        # Do not start timer here; call start_monitoring() after QApplication is running
         
         # Validation results
         self.validation_results = {}

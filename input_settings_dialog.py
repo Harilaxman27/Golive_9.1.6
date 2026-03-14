@@ -171,7 +171,7 @@ class InputSettingsDialog(QDialog):
         self.fps_combo = QComboBox()
         for fps in FPS_PRESETS:
             self.fps_combo.addItem(f"{fps} FPS", fps)
-        self.fps_combo.setCurrentIndex(2)  # Default 30 FPS
+        self.fps_combo.setCurrentIndex(3)  # Default 60 FPS for high-end cameras
         fps_col.addWidget(self.fps_combo)
         res_fps_layout.addLayout(fps_col)
         
@@ -215,11 +215,6 @@ class InputSettingsDialog(QDialog):
         # Initialize
         self._populate_cameras()
         
-        # NOTE: Picture/Advanced/Effects tabs removed as per user request for "basic functionalities"
-        
-        # Initialize
-        self._populate_cameras()
-        
         # Connect real-time updates
         self._connect_real_time_updates()
     
@@ -254,77 +249,125 @@ class InputSettingsDialog(QDialog):
     
     def _on_camera_changed(self, index):
         """Handle camera selection change."""
-        camera_info = self.camera_combo.currentData()
-        if camera_info:
+        camera_device = self.camera_combo.currentData()
+        if camera_device:
             self.status_label.setText(f"📹 Selected: {self.camera_combo.currentText()}")
+            # Auto-detect and set best resolution/FPS when camera is selected
+            if self._auto_detect_from_qt_device(camera_device):
+                try:
+                    self.settingsChanged.emit(self.get_settings())
+                except Exception:
+                    pass
     
+    def _auto_detect_from_qt_device(self, camera_device) -> bool:
+        """Auto-detect best resolution and FPS from Qt camera device (works on Windows, macOS, Linux)."""
+        try:
+            if not hasattr(camera_device, 'videoFormats'):
+                return False
+            formats = camera_device.videoFormats()
+            if not formats:
+                return False
+            best_w = best_h = 0
+            best_fps = 30.0
+            best_score = (-1, -1, -1.0)  # (res_pixels, prefer_1080p, fps)
+            for fmt in formats:
+                try:
+                    size = fmt.resolution()
+                    w = int(size.width()) if hasattr(size, 'width') else int(getattr(size, 'width', 0))
+                    h = int(size.height()) if hasattr(size, 'height') else int(getattr(size, 'height', 0))
+                    fps_max = float(fmt.maxFrameRate()) if hasattr(fmt, 'maxFrameRate') else 30.0
+                    if fps_max <= 0:
+                        fps_max = 30.0
+                    res_pixels = w * h
+                    prefer_1080p = 1 if (w == 1920 and h == 1080) else 0
+                    score = (res_pixels, prefer_1080p, fps_max)
+                    if score > best_score:
+                        best_score = score
+                        best_w, best_h, best_fps = w, h, fps_max
+                except Exception:
+                    continue
+            if best_w <= 0 or best_h <= 0:
+                best_w, best_h = 1920, 1080
+            if best_fps <= 0:
+                best_fps = 60.0
+            self._apply_detected_settings(best_w, best_h, best_fps)
+            return True
+        except Exception as e:
+            print(f"Qt auto-detect error: {e}")
+            return False
+
+    def _apply_detected_settings(self, detected_w: int, detected_h: int, detected_fps: float):
+        """Apply detected resolution and FPS to combo boxes."""
+        def _nearest_resolution_index(w: int, h: int) -> int:
+            best_i = 0
+            best_diff = 10**9
+            for i in range(self.resolution_combo.count()):
+                data = self.resolution_combo.itemData(i)
+                if not data:
+                    continue
+                rw, rh = data
+                diff = abs(rw - w) + abs(rh - h)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_i = i
+            return best_i
+
+        def _select_fps(fps_value: float) -> None:
+            best_i = -1
+            best_diff = 10**9
+            for i in range(self.fps_combo.count()):
+                val = self.fps_combo.itemData(i)
+                if val is None:
+                    continue
+                diff = abs(int(val) - int(round(fps_value)))
+                if diff < best_diff:
+                    best_diff = diff
+                    best_i = i
+            if best_i >= 0:
+                self.fps_combo.setCurrentIndex(best_i)
+            else:
+                self.fps_combo.insertItem(0, f"{int(round(fps_value))} FPS", int(round(fps_value)))
+                self.fps_combo.setCurrentIndex(0)
+
+        res_i = _nearest_resolution_index(detected_w, detected_h)
+        self.resolution_combo.setCurrentIndex(res_i)
+        _select_fps(detected_fps)
+        self.status_label.setText(f"✅ Auto-detected: {detected_w}×{detected_h} @ {int(round(detected_fps))} FPS")
+
     def _auto_detect_settings(self):
         """Auto-detect best resolution and FPS for selected camera."""
         try:
-            cam_index = self.camera_combo.currentIndex()
             cam_data = self.camera_combo.currentData()
-            if cam_index <= 0 or cam_data is None:
+            if cam_data is None:
                 self.status_label.setText("⚠️ Please select a camera before auto-detecting")
                 return
+            # Prefer Qt-based detection (works on Windows, macOS, Linux)
+            if self._auto_detect_from_qt_device(cam_data):
+                try:
+                    current = self.get_settings()
+                    current['output_profile_auto'] = True
+                    self.settingsChanged.emit(current)
+                except Exception:
+                    pass
+                return
+            # Fallback: av_capture probe (macOS only)
             try:
                 from av_capture import probe_device
             except Exception:
                 probe_device = None
-            detected_w = detected_h = 0
-            detected_fps = 30.0
+            detected_w, detected_h, detected_fps = 1920, 1080, 60.0
             if probe_device is not None:
                 try:
-                    device_id = cam_index - 1
+                    cam_index = self.camera_combo.currentIndex()
+                    device_id = max(0, cam_index - 1)
                     info = probe_device(device_id, sample_seconds=0.8)
                     if info and info.get('ok'):
-                        detected_w = int(info.get('width') or 0)
-                        detected_h = int(info.get('height') or 0)
-                        detected_fps = float(info.get('fps') or 30.0)
+                        detected_w = int(info.get('width') or 1920)
+                        detected_h = int(info.get('height') or 1080)
+                        detected_fps = float(info.get('fps') or 60.0)
                 except Exception:
                     pass
-            if detected_w <= 0 or detected_h <= 0:
-                detected_w, detected_h = 1920, 1080
-            if detected_fps <= 0:
-                detected_fps = 30.0
-
-            def _nearest_resolution_index(w: int, h: int) -> int:
-                best_i = 0
-                best_diff = 10**9
-                for i in range(self.resolution_combo.count()):
-                    data = self.resolution_combo.itemData(i)
-                    if not data:
-                        continue
-                    rw, rh = data
-                    diff = abs(rw - w) + abs(rh - h)
-                    if diff < best_diff:
-                        best_diff = diff
-                        best_i = i
-                return best_i
-
-            def _select_fps(fps_value: float) -> None:
-                # Try to find closest preset; insert if not present
-                best_i = -1
-                best_diff = 10**9
-                for i in range(self.fps_combo.count()):
-                    val = self.fps_combo.itemData(i)
-                    if val is None:
-                        continue
-                    diff = abs(int(val) - int(round(fps_value)))
-                    if diff < best_diff:
-                        best_diff = diff
-                        best_i = i
-                if best_i >= 0:
-                    self.fps_combo.setCurrentIndex(best_i)
-                else:
-                    self.fps_combo.insertItem(0, f"{int(round(fps_value))} FPS", int(round(fps_value)))
-                    self.fps_combo.setCurrentIndex(0)
-
-            res_i = _nearest_resolution_index(detected_w, detected_h)
-            self.resolution_combo.setCurrentIndex(res_i)
-            _select_fps(detected_fps)
-
-            self.status_label.setText(f"✅ Auto-detected: {detected_w}×{detected_h} @ {int(round(detected_fps))} FPS")
-
+            self._apply_detected_settings(detected_w, detected_h, detected_fps)
             try:
                 current = self.get_settings()
                 current['output_profile_auto'] = True

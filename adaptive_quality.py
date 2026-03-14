@@ -115,6 +115,7 @@ class AdaptiveQualityManager(QObject):
         self.monitor_timer = QTimer(self)
         self.monitor_timer.timeout.connect(self._monitor_performance)
         self.monitor_interval = 2000  # 2 seconds
+        # Do not start timer here; call start_monitoring() after QApplication is running
         
         # Statistics
         self.stats = {
@@ -126,9 +127,10 @@ class AdaptiveQualityManager(QObject):
             'last_change_time': time.time()
         }
         
-        # Start monitoring if adaptive
-        if self.adaptive_mode:
-            self.monitor_timer.start(self.monitor_interval)
+        # Start monitoring if adaptive (do NOT start automatically at import time).
+        # Calling modules should explicitly call start_monitoring() after QApplication is running.
+        # if self.adaptive_mode:
+        #     self.monitor_timer.start(self.monitor_interval)
     
     def set_quality_level(self, level: QualityLevel):
         """Manually set quality level."""

@@ -32,8 +32,12 @@ class CameraProcessor:
     
     def update_settings(self, settings: Dict):
         """Update camera processing settings."""
+        prev_fps = self.current_settings.get('fps') if self.current_settings else None
+        prev_res = self.current_settings.get('resolution') if self.current_settings else None
         self.current_settings = settings
-        print(f"✅ Camera processor updated with settings: {settings}")
+        # Only log when fps/resolution change to reduce noise
+        if prev_fps != settings.get('fps') or prev_res != settings.get('resolution'):
+            print(f"✅ Camera processor updated: {settings.get('resolution', '?')} @ {settings.get('fps', '?')}fps")
     
     def process_numpy(self, arr: np.ndarray) -> np.ndarray:
         """Process a numpy array (RGB) directly."""

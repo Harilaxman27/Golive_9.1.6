@@ -49,7 +49,7 @@ class FPSStabilizer:
         
         # Round to nearest 5 for stability
         rounded_fps = round(measured_fps / 5) * 5
-        rounded_fps = max(15, min(60, rounded_fps))  # Clamp between 15-60
+        rounded_fps = max(24, min(60, rounded_fps))  # Minimum 24 FPS to prevent lag
         
         # Check if enough time has passed since last update
         current_time = time.time()
@@ -123,11 +123,13 @@ class AdaptiveFPSManager:
         stabilizer = self.get_stabilizer(component)
         should_update, fps = stabilizer.should_update(measured_fps)
         
-        # Apply performance mode limits
+        # Apply performance mode limits (never below 24 FPS)
         if self.performance_mode == 'performance':
-            fps = min(fps, 30)  # Cap at 30fps for performance
+            fps = max(24, min(fps, 30))  # Cap at 30fps, min 24
         elif self.performance_mode == 'balanced':
-            fps = min(fps, 45)  # Cap at 45fps for balanced
+            fps = max(24, min(fps, 45))  # Cap at 45fps, min 24
+        else:
+            fps = max(24, fps)
         
         return should_update, fps
     
@@ -135,12 +137,12 @@ class AdaptiveFPSManager:
         """Set the global performance mode."""
         if mode in ['performance', 'balanced', 'quality']:
             self.performance_mode = mode
-            # Reset all stabilizers with new limits
+            # Reset all stabilizers with new limits (never below 24 FPS)
             for stabilizer in self.stabilizers.values():
                 if mode == 'performance':
-                    stabilizer.stable_fps = min(stabilizer.stable_fps, 30)
+                    stabilizer.stable_fps = max(24, min(stabilizer.stable_fps, 30))
                 elif mode == 'balanced':
-                    stabilizer.stable_fps = min(stabilizer.stable_fps, 45)
+                    stabilizer.stable_fps = max(24, min(stabilizer.stable_fps, 45))
     
     def get_global_statistics(self) -> dict:
         """Get statistics for all components."""

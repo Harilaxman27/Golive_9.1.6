@@ -12,9 +12,34 @@ Key Improvements:
 
 from __future__ import annotations
 from typing import Optional, Callable
-from PyQt6.QtCore import QObject, QTimer, QSize, Qt
+import time
+import traceback
+import os
+from PyQt6.QtCore import QObject, QTimer, QSize, Qt, QThread
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import QWidget, QLabel
+
+
+def _diag_error_mirror(context: str, error: Exception, extra: str = ""):
+    """Pinpoints exactly where an error occurred in mirror controller."""
+    tb = traceback.extract_tb(error.__traceback__)
+    if tb:
+        last = tb[-1]
+        file_short = os.path.basename(last.filename)
+        line = last.lineno
+        func = last.name
+        print(f"\n{'='*60}")
+        print(f"[MIRROR ERROR] ❌ {context}")
+        print(f"[MIRROR ERROR]    File    : {file_short}")
+        print(f"[MIRROR ERROR]    Line    : {line}")
+        print(f"[MIRROR ERROR]    Function: {func}")
+        print(f"[MIRROR ERROR]    Type    : {type(error).__name__}")
+        print(f"[MIRROR ERROR]    Message : {error}")
+        if extra:
+            print(f"[MIRROR ERROR]    Context : {extra}")
+        print(f"{'='*60}\n")
+    else:
+        print(f"[MIRROR ERROR] ❌ {context}: {type(error).__name__}: {error}")
 
 
 class _EnhancedProgramOutputWindow(QWidget):
@@ -49,6 +74,10 @@ class _EnhancedProgramOutputWindow(QWidget):
         # Cache native resolution for optimal rendering
         self._cached_native_size: Optional[QSize] = None
         self._update_native_size()
+        
+        # FIX 1: Cache QPixmap to prevent memory leak (reuse instead of create new each frame)
+        self._cached_pixmap: Optional[QPixmap] = None
+        self._last_pixmap_key: int = -1
         
         self.showFullScreen()
         
@@ -89,47 +118,53 @@ class _EnhancedProgramOutputWindow(QWidget):
     
     def set_frame(self, img: QImage):
         """
-        PIXELATION FIX: Set frame with pixel-perfect rendering.
+        FIX 3: PERFORMANCE FIX - Avoid redundant allocations when sizes match.
         
-        The key insight is that we should never upscale - always render
-        at the target resolution from the source.
+        Key optimization:
+        - When frame size == window size: skip scaled() entirely (1 allocation vs 3)
+        - When sizes differ: scale first, then convert format on the SMALLER image
+        - FastTransformation for speed (nearest-neighbor, no bilinear filter CPU cost)
+        - Explicit del to help GC release Qt objects immediately
+        
+        This executes on the calling thread (via QueuedConnection from render thread).
+        We minimize per-call overhead by avoiding wasteful allocations.
         """
         if img is None or img.isNull():
             return
         
-        native_size = self.native_pixel_size()
+        # FIX B2: Skip if this exact frame was already displayed (no new camera data)
+        frame_key = img.cacheKey()
+        if frame_key == self._last_pixmap_key:
+            return
+        self._last_pixmap_key = frame_key
         
-        # CRITICAL: If the image is already at native resolution, use it directly
-        if img.size() == native_size:
-            pixmap = QPixmap.fromImage(img)
-            try:
-                dpr = float(self.devicePixelRatioF())
-                pixmap.setDevicePixelRatio(dpr)
-            except Exception:
-                pass
-            self._label.setPixmap(pixmap)
+        window_size = self._label.size()
+        if not window_size.isValid() or window_size.width() < 4:
             return
         
-        # If not native size, we have a problem in the pipeline
-        # The frame provider should have rendered at native resolution
-        print(f"Warning: Frame size mismatch. Expected {native_size.width()}x{native_size.height()}, "
-              f"got {img.width()}x{img.height()}. This may cause pixelation.")
+        # OPTIMIZATION: Check if sizes already match (cached frame is pre-scaled)
+        sizes_match = (img.width() == window_size.width() and 
+                       img.height() == window_size.height())
         
-        # As a fallback, scale with highest quality
-        scaled_img = img.scaled(
-            native_size,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
-        
-        pixmap = QPixmap.fromImage(scaled_img)
-        try:
-            dpr = float(self.devicePixelRatioF())
-            pixmap.setDevicePixelRatio(dpr)
-        except Exception:
-            pass
+        if sizes_match:
+            # FAST PATH: already the right size — just convert format once
+            if img.format() != QImage.Format.Format_RGB32:
+                img = img.convertToFormat(QImage.Format.Format_RGB32)
+            pixmap = QPixmap.fromImage(img)
+        else:
+            # SLOW PATH: need to scale — convert format first (on smaller image after scale)
+            scaled_img = img.scaled(
+                window_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.FastTransformation
+            )
+            if scaled_img.format() != QImage.Format.Format_RGB32:
+                scaled_img = scaled_img.convertToFormat(QImage.Format.Format_RGB32)
+            pixmap = QPixmap.fromImage(scaled_img)
+            del scaled_img
         
         self._label.setPixmap(pixmap)
+        del pixmap
     
     def native_pixel_size(self) -> QSize:
         """
@@ -140,6 +175,20 @@ class _EnhancedProgramOutputWindow(QWidget):
             return self._cached_native_size
         
         return self._calculate_native_size()
+    
+    def closeEvent(self, event):
+        """MEMORY FIX: Cleanup pixmap cache and label to prevent memory leak."""
+        try:
+            self._label.clear()
+            self._label.setPixmap(QPixmap())  # set empty pixmap to release memory
+        except Exception:
+            pass
+        try:
+            if hasattr(self, '_cached_pixmap') and self._cached_pixmap is not None:
+                del self._cached_pixmap
+        except Exception:
+            pass
+        super().closeEvent(event)
 
 
 class EnhancedDisplayMirrorController(QObject):
@@ -159,10 +208,6 @@ class EnhancedDisplayMirrorController(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         
-        # Frame delivery timer
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
-        
         # Display settings
         self._fps = 60
         self._size = QSize(1920, 1080)  # Default, will be updated to native
@@ -176,9 +221,18 @@ class EnhancedDisplayMirrorController(QObject):
         self._window: Optional[_EnhancedProgramOutputWindow] = None
         self._running = False
         
+        # Render thread reference (will connect to existing GraphicsRenderThread)
+        self._timer = None  # no longer used
+        self._render_thread = None  # will hold reference to shared render thread
+        self._owns_render_thread = False  # track if we created fallback thread
+        
         # Performance tracking
         self._frame_count = 0
         self._last_fps_report = 0
+        
+        # FIX 2: Cache frame ID to avoid redundant frame_provider calls
+        self._cached_frame_id = -1    # Track last delivered frame ID
+        self._last_frame_size = None  # Track size for cache invalidation
         
         print("Enhanced Display Mirror Controller initialized")
     
@@ -205,13 +259,20 @@ class EnhancedDisplayMirrorController(QObject):
         if self._running:
             return
         
+        # Initialize timing variables - use perf_counter for high precision
+        self._mirror_start_time = time.perf_counter()
+        self._mirror_last_frame_time = time.perf_counter()
+        self._mirror_last_report_time = time.perf_counter()
+        self._mirror_dropped_frames = 0
+        self._mirror_max_jitter_ms = 0.0
+        
         try:
             from PyQt6.QtGui import QGuiApplication
             from PyQt6.QtCore import QRect
             
-            # Extract settings
+            # Extract settings - default to 30fps to match camera
             self._screen_index = int(settings.get('screen_index', 0))
-            self._fps = int(settings.get('fps', 60))
+            self._fps = int(settings.get('fps', 30))  # Default 30fps to match camera
             self._direct_passthrough = bool(settings.get('direct_passthrough', False))
             
             # Determine screen geometry
@@ -248,15 +309,48 @@ class EnhancedDisplayMirrorController(QObject):
             native_size = self._window.native_pixel_size()
             self._size = native_size
             
-            print(f"Enhanced mirroring started:")
-            print(f"  - Screen: {self._screen_index} ({geo.width()}x{geo.height()})")
-            print(f"  - Native resolution: {native_size.width()}x{native_size.height()}")
-            print(f"  - Mode: {'DIRECT PASSTHROUGH' if self._direct_passthrough else 'NORMAL'}")
-            print(f"  - FPS: {self._fps}")
+            # === DIAGNOSTIC: Mirror startup header ===
+            print(f"\n[MIRROR] ═══════════════════════════════════════════")
+            print(f"[MIRROR] 🔴 MIRROR STARTED")
+            print(f"[MIRROR]    Screen    : {self._screen_index} ({geo.width()}x{geo.height()})")
+            print(f"[MIRROR]    Target FPS: {self._fps} (synced to camera)")
+            print(f"[MIRROR]    Mode      : {'DIRECT PASSTHROUGH' if self._direct_passthrough else 'NORMAL'}")
+            print(f"[MIRROR]    Time      : {time.strftime('%H:%M:%S')}")
+            print(f"[MIRROR] ═══════════════════════════════════════════\n")
             
-            # Start frame delivery timer
-            interval = max(1, int(1000 / max(1, self._fps)))
-            self._timer.start(interval)
+            # Connect to the existing active render thread instead of using QTimer
+            from enhanced_graphics_output import EnhancedGraphicsOutputWidget
+            
+            # Disconnect from any previous connection first
+            if self._render_thread is not None:
+                try:
+                    self._render_thread.render_tick.disconnect(self._tick)
+                except Exception:
+                    pass
+                self._render_thread = None
+                self._owns_render_thread = False
+            
+            # Find the first active render thread and connect to it
+            active_threads = EnhancedGraphicsOutputWidget._all_render_threads
+            
+            if active_threads:
+                self._render_thread = active_threads[0]
+                self._render_thread.render_tick.connect(
+                    self._tick, Qt.ConnectionType.QueuedConnection
+                )
+                self._owns_render_thread = False
+                print(f"[MIRROR] Connected to existing render thread (frame-synchronized)")
+            else:
+                # Fallback: create own render thread only if none exists
+                from enhanced_graphics_output import GraphicsRenderThread
+                self._render_thread = GraphicsRenderThread(fps=self._fps)
+                self._render_thread.render_tick.connect(
+                    self._tick, Qt.ConnectionType.QueuedConnection
+                )
+                self._render_thread.start()
+                self._owns_render_thread = True
+                print(f"[MIRROR] Created fallback render thread at {self._fps}fps")
+            
             self._running = True
             
         except Exception as e:
@@ -266,7 +360,31 @@ class EnhancedDisplayMirrorController(QObject):
     def stop(self):
         """Stop mirroring and cleanup resources."""
         try:
-            self._timer.stop()
+            # === DIAGNOSTIC: Mirror stop header ===
+            if self._mirror_start_time is not None:
+                elapsed = time.monotonic() - self._mirror_start_time
+                if self._frame_count > 0:
+                    avg_fps = self._frame_count / elapsed if elapsed > 0 else 0
+                else:
+                    avg_fps = 0
+                print(f"\n[MIRROR] ⬛ MIRROR STOPPED")
+                print(f"[MIRROR]    Total frames delivered: {self._frame_count}")
+                print(f"[MIRROR]    Total frames dropped  : {self._mirror_dropped_frames}")
+                print(f"[MIRROR]    Session avg FPS       : {avg_fps:.2f}")
+                print(f"[MIRROR]    Time                  : {time.strftime('%H:%M:%S')}\n")
+            
+            # Disconnect from render thread signal
+            if self._render_thread is not None:
+                try:
+                    self._render_thread.render_tick.disconnect(self._tick)
+                except Exception:
+                    pass
+                # Only stop the render thread if we created the fallback one
+                if self._owns_render_thread and self._render_thread is not None:
+                    self._render_thread.quit()
+                    self._render_thread.wait()
+                self._owns_render_thread = False
+                self._render_thread = None
         except Exception:
             pass
         
@@ -281,77 +399,89 @@ class EnhancedDisplayMirrorController(QObject):
     
     def _tick(self):
         """
-        Frame delivery tick - requests frame at native resolution.
-        
-        PIXELATION FIX: Always request frames at the exact native resolution
-        of the external display to prevent any scaling artifacts.
+        Frame delivery tick - called by render thread on every frame.
+        Simply displays the frame without timing filters.
+        The render thread handles pacing at exactly 30fps.
         """
         if not self._running or not self._window or not self._frame_provider:
             return
         
         try:
-            # Ensure we're always using the current native resolution
-            current_native = self._window.native_pixel_size()
-            if current_native != self._size:
-                self._size = current_native
-                print(f"Updated render size to native: {self._size.width()}x{self._size.height()}")
+            # Use actual mirror DISPLAY size
+            mirror_display_size = self._window.size()
+            if not mirror_display_size.isValid() or mirror_display_size.width() < 100:
+                mirror_display_size = QSize(1280, 720)
             
-            # Request frame at exact native resolution
-            # This is CRITICAL - no upscaling should occur
+            if mirror_display_size != self._size:
+                self._size = mirror_display_size
+                print(f"[MIRROR] Updated display size to: {self._size.width()}x{self._size.height()}")
+            
+            # Request frame at mirror DISPLAY resolution
             try:
                 img = self._frame_provider(self._size, self._direct_passthrough)
             except TypeError:
-                # Fallback for providers that don't support direct_passthrough
                 img = self._frame_provider(self._size)
             
             if img is None or img.isNull():
+                self._mirror_dropped_frames += 1
                 return
             
-            # Verify frame is at expected resolution
-            if img.size() != self._size:
-                print(f"Warning: Frame provider returned {img.width()}x{img.height()}, "
-                      f"expected {self._size.width()}x{self._size.height()}")
-            
-            # Display the frame
+            # Display the frame immediately - no timing filters
             self._window.set_frame(img)
+            del img
             
-            # Performance tracking
+            # Count frame
             self._frame_count += 1
-            if self._frame_count % (self._fps * 5) == 0:  # Report every 5 seconds
-                print(f"Enhanced mirror: {self._frame_count} frames delivered at {self._size.width()}x{self._size.height()}")
+            now_sec = time.perf_counter()
+            
+            # Track timing for jitter measurement
+            if self._mirror_last_frame_time is not None:
+                frame_interval_ms = (now_sec - self._mirror_last_frame_time) * 1000
+                expected_interval_ms = 1000.0 / self._fps
+                jitter_ms = abs(frame_interval_ms - expected_interval_ms)
+                
+                # Track max jitter (ignore first 10 frames for warmup)
+                if self._frame_count > 10 and jitter_ms > self._mirror_max_jitter_ms:
+                    self._mirror_max_jitter_ms = jitter_ms
+            
+            self._mirror_last_frame_time = now_sec
+            
+            # 5-second FPS reporting
+            if self._mirror_last_report_time is not None and self._mirror_start_time is not None:
+                if (now_sec - self._mirror_last_report_time) >= 5.0:
+                    total_elapsed = now_sec - self._mirror_start_time
+                    avg_fps = self._frame_count / total_elapsed if total_elapsed > 0 else 0
+                    
+                    # Smoothness indicator with <10ms target
+                    jitter_status = "✅" if self._mirror_max_jitter_ms < 10 else "⚠️" if self._mirror_max_jitter_ms < 20 else "❌"
+                    
+                    print(f"[MIRROR] {jitter_status} FPS: {avg_fps:.1f} | "
+                          f"Frames: {self._frame_count} | Dropped: {self._mirror_dropped_frames} | "
+                          f"Max jitter: {self._mirror_max_jitter_ms:.1f}ms")
+                    
+                    self._mirror_last_report_time = now_sec
+                    self._mirror_max_jitter_ms = 0.0
             
         except Exception as e:
-            print(f"Error in enhanced mirror tick: {e}")
-            import traceback
-            traceback.print_exc()
+            _diag_error_mirror("Mirror tick failed", e, f"Frame #{self._frame_count}")
     
     def update(self, settings: dict):
-        """
-        Update mirror settings while running.
-        
-        PIXELATION FIX: Always maintain native resolution rendering.
-        """
+        """Update mirror settings at runtime."""
         if not self._running:
             return
-        
         try:
-            # Update FPS if changed
             new_fps = int(settings.get('fps', self._fps))
             if new_fps != self._fps:
                 self._fps = max(1, new_fps)
-                interval = max(1, int(1000 / max(1, self._fps)))
-                self._timer.setInterval(interval)
-                print(f"Updated mirror FPS to {self._fps}")
-            
-            # Update direct passthrough mode
+                if self._render_thread is not None:
+                    self._render_thread.set_fps(self._fps)
+                print(f"[MIRROR] FPS updated to {self._fps}")
+
             new_passthrough = bool(settings.get('direct_passthrough', self._direct_passthrough))
             if new_passthrough != self._direct_passthrough:
                 self._direct_passthrough = new_passthrough
-                print(f"Updated passthrough mode: {self._direct_passthrough}")
-            
-            # Note: We ignore width/height settings because we always use native resolution
-            # This is intentional to prevent pixelation
-            
+                print(f"[MIRROR] Passthrough updated: {self._direct_passthrough}")
+
         except Exception as e:
             print(f"Error updating enhanced mirror settings: {e}")
     

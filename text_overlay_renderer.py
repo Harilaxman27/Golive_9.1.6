@@ -6,7 +6,7 @@ Renders text overlays onto video frames using the settings from TextOverlaySetti
 """
 
 from PyQt6.QtGui import QPainter, QFont, QColor, QPen, QBrush, QFontMetrics, QImage, QPainterPath
-from PyQt6.QtCore import Qt, QRect, QPoint, QPointF
+from PyQt6.QtCore import Qt, QRect, QPoint, QPointF, QMutex, QMutexLocker
 from typing import Dict, Optional, Tuple
 import math
 
@@ -17,6 +17,8 @@ class TextOverlayRenderer:
         self.current_settings: Optional[Dict] = None
         self.cached_font: Optional[QFont] = None
         self.cached_metrics: Optional[QFontMetrics] = None
+        # Thread safety: protect rendering operations from concurrent access
+        self._render_mutex = QMutex()
     
     def update_settings(self, settings: Dict):
         """Update text overlay settings and invalidate cache."""
@@ -40,31 +42,73 @@ class TextOverlayRenderer:
         self.cached_metrics = QFontMetrics(self.cached_font)
     
     def render_overlay(self, frame: QImage) -> QImage:
-        """Render text overlay onto the provided frame."""
+        """Render text overlay onto the provided frame with thread safety."""
         if not self.current_settings or not self.current_settings.get('text'):
             return frame
         
-        # Create a copy to avoid modifying the original
-        result = frame.copy()
-        painter = QPainter(result)
+        # THREAD SAFETY: Acquire mutex to protect rendering from concurrent access
+        # This prevents Qt crashes when QPainter/QImage operations happen on wrong thread
+        locker = QMutexLocker(self._render_mutex)
         
         try:
-            # Enable antialiasing for smooth text
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            # Create a copy to avoid modifying the original
+            # The copy is created under mutex protection so no interference occurs
+            result = frame.copy()
+            if result.isNull():
+                return frame  # If copy failed, return original
             
-            self._render_text(painter, result.size())
+            # Create painter under mutex protection
+            painter = QPainter(result)
+            if not painter.isActive():
+                return frame  # If painter failed to activate, return original
             
+            try:
+                # Enable antialiasing for smooth text
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+                
+                # Render text while mutex is held
+                self._render_text(painter, result.size())
+                
+            finally:
+                painter.end()
+            
+            return result
+        except KeyboardInterrupt:
+            # Allow keyboard interrupt to propagate cleanly without crash
+            return frame
+        except Exception as e:
+            # If rendering fails, log and return original frame
+            print(f"[TEXT_OVERLAY] Rendering failed: {e}")
+            return frame
         finally:
-            painter.end()
-        
-        return result
+            # Mutex is automatically released when locker goes out of scope
+            pass
     
     def _render_text(self, painter: QPainter, frame_size):
         """Render the text with all styling options."""
-        if not self.cached_font or not self.cached_metrics:
+        if not self.cached_font:
             return
         
+        # --- WINDOWS CRASH FIX: FONT SANITIZATION ---
+        # The crash happens later at path.addText if using "MS Sans Serif".
+        # We catch it here and swap it for a safe vector font.
+        current_family = self.cached_font.family()
+        if "Sans Serif" in current_family or "MS Shell Dlg" in current_family:
+            # Force update to Segoe UI to prevent DirectWrite crash
+            safe_font = QFont("Segoe UI", self.cached_font.pointSize())
+            safe_font.setBold(self.cached_font.bold())
+            safe_font.setItalic(self.cached_font.italic())
+            safe_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+            self.cached_font = safe_font
+            
+            # Re-calculate metrics since font changed
+            self.cached_metrics = QFontMetrics(self.cached_font)
+        # ---------------------------------------------
+
+        if not self.cached_metrics:
+             return
+
         text = self.current_settings['text']
         if not text.strip():
             return
@@ -99,7 +143,8 @@ class TextOverlayRenderer:
         text_x = max(10, min(text_x, frame_size.width() - text_width - 10))
         text_y = max(text_height, min(text_y, frame_size.height() - 10))
         
-        text_position = QPoint(text_x, text_y + text_height)
+        # Note: QPainterPath expects baseline, so we add text_height
+        text_position = QPoint(text_x, text_y + self.cached_metrics.ascent())
         
         # Render background if enabled
         if self.current_settings.get('bg_enabled', False):
@@ -111,6 +156,7 @@ class TextOverlayRenderer:
         
         # Build vector path for text once
         path = QPainterPath()
+        # This is the line that was crashing:
         path.addText(QPointF(text_position.x(), text_position.y()), self.cached_font, text)
         
         # Render outline if enabled
@@ -147,18 +193,30 @@ class TextOverlayRenderer:
         painter.drawText(shadow_position, text)
     
     def _render_outline(self, painter: QPainter, text_path: QPainterPath):
-        """Render outline around text using vector stroking."""
-        outline_width = int(self.current_settings.get('outline_width', self.current_settings.get('stroke_width', 2)))
-        color_value = self.current_settings.get('stroke_color', '#000000')
-        outline_color = QColor(color_value)
-        if outline_width > 0:
-            pen = QPen(outline_color)
-            pen.setWidth(outline_width)
-            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            painter.setPen(pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawPath(text_path)
+        """Render outline around text using vector stroking with safety checks."""
+        try:
+            if not painter.isActive():
+                return  # Painter is in invalid state
+            
+            outline_width = int(self.current_settings.get('outline_width', self.current_settings.get('stroke_width', 2)))
+            color_value = self.current_settings.get('stroke_color', '#000000')
+            outline_color = QColor(color_value)
+            
+            if outline_width > 0 and not text_path.isEmpty():
+                pen = QPen(outline_color)
+                pen.setWidth(outline_width)
+                pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                painter.setPen(pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                # Final safety check before drawing
+                if painter.isActive():
+                    painter.drawPath(text_path)
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            # Silently handle outline errors to prevent crashes
+            pass
     
     def is_enabled(self) -> bool:
         """Check if text overlay is currently enabled."""

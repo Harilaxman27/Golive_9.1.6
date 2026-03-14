@@ -71,10 +71,13 @@ class EnhancedCameraInput(QObject):
         self.last_stats_time = time.monotonic()
         self.last_frame_count = 0
         
-        # Stats timer
+        # Stats timer (do not start here; call start_stats_timer() after QApplication is running)
         self.stats_timer = QTimer()
         self.stats_timer.timeout.connect(self._update_stats)
-        self.stats_timer.start(1000)  # Update stats every second
+
+    def start_stats_timer(self):
+        if not self.stats_timer.isActive():
+            self.stats_timer.start(1000)
     
     def start_capture(self, width: int = 1920, height: int = 1080, fps: float = 60.0) -> bool:
         """Start camera capture with specified settings"""
